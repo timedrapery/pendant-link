@@ -7,6 +7,14 @@ set -euo pipefail
 
 ARCHIVE="${PENDANT_ARCHIVE:-$HOME/recordings}"
 REMOTE="${PENDANT_BACKUP_REMOTE:-pendant-backup:}"
+TRANSCRIPTS_REMOTE="${PENDANT_TRANSCRIPTS_REMOTE:-gdrive:pendant-transcripts}"
+
+# Settings saved in ~/.config/pendant/env; anything already set in the shell wins.
+# PENDANT_TRANSCRIPTS_TO_DRIVE=yes also puts readable .txt transcripts (text only, never
+# audio) in a pendant-transcripts folder on Drive, so Claude can read them. Google can too.
+if [ -z "${PENDANT_TRANSCRIPTS_TO_DRIVE:-}" ] && [ -f "$HOME/.config/pendant/env" ]; then
+  PENDANT_TRANSCRIPTS_TO_DRIVE=$(sed -n 's/^PENDANT_TRANSCRIPTS_TO_DRIVE=//p' "$HOME/.config/pendant/env" | tail -1)
+fi
 LOG="$ARCHIVE/backup.log"
 
 mkdir -p "$ARCHIVE"
@@ -23,3 +31,14 @@ rclone copy "$ARCHIVE" "$REMOTE" \
   --transfers 2 \
   --stats-one-line --stats 60s -v || { log "Backup failed; will try again tomorrow."; exit 1; }
 log "Backup done."
+
+if [ "${PENDANT_TRANSCRIPTS_TO_DRIVE:-}" = "yes" ]; then
+  log "Copying readable transcripts (text only) to $TRANSCRIPTS_REMOTE"
+  rclone copy "$ARCHIVE" "$TRANSCRIPTS_REMOTE" \
+    --filter "- .incoming/**" \
+    --filter "+ */" \
+    --filter "+ pendant_*.txt" \
+    --filter "- *" \
+    --stats-one-line --stats 60s -v || { log "Copying transcripts failed; will try again tomorrow."; exit 1; }
+  log "Transcripts done."
+fi

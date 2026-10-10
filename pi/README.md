@@ -103,4 +103,6 @@ pendant transcribe --limit 1
 systemctl --user enable --now pendant-transcribe.timer
 ```
 
+**Readable transcripts for Claude.** With `PENDANT_TRANSCRIPTS_TO_DRIVE=yes` in `~/.config/pendant/env`, the nightly backup also copies the `.txt` transcripts, unencrypted, to a `pendant-transcripts` folder on Drive (text only, never audio), so Claude can read them through the Google Drive connection. Google can read them too. Remove the line to stop; delete the folder on Drive to remove what's there.
+
 Also: `pendant transcribe --list` (what's waiting), `--redo FILE` (transcribe one again). Settings: `PENDANT_WHISPER_MODEL` (`tiny.en` is faster, `small.en` more accurate), `PENDANT_WHISPER_BEAM` (1; higher is slower and a little more accurate). Log: `~/recordings/transcribe.log`. Tests (stand-in model): `pytest pi/tests`.
