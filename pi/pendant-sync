@@ -45,28 +45,11 @@ if ! timeout 45 "$PENDANT" status >/dev/null 2>&1; then
   exit 0
 fi
 
+# File downloads into date folders without ever losing a better copy (see pendant_file.py).
 # Anything left in .incoming from an interrupted run gets filed first.
+FILER="${PENDANT_FILER:-$(dirname "$(readlink -f "$0")")/pendant_file.py}"
 file_incoming() {
-  local f day
-  for f in "$INCOMING"/pendant_*; do
-    [ -e "$f" ] || continue
-    day=$(basename "$f" | sed -E 's/^pendant_([0-9]{4})([0-9]{2})([0-9]{2})_.*/\1-\2-\3/')
-    case "$day" in
-      [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
-      *) day="undated" ;;
-    esac
-    mkdir -p "$ARCHIVE/$day"
-    target="$ARCHIVE/$day/$(basename "$f")"
-    if [ -e "$target" ]; then
-      # Same start time: pages that weren't freed last time were downloaded again, with
-      # anything newer. The new copy holds everything the old one did, so it replaces it,
-      # and the transcript is redone.
-      base="${target%.*}"
-      rm -f "$base.txt" "$base.words.json"
-      case "$target" in *.opus) log "Replacing $(basename "$base") with a newer, longer download of the same recording" ;; esac
-    fi
-    mv -f "$f" "$ARCHIVE/$day/"
-  done
+  python3 "$FILER" "$INCOMING" "$ARCHIVE"
 }
 file_incoming
 

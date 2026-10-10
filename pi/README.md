@@ -180,10 +180,14 @@ Check it's scheduled: `systemctl --user list-timers` shows **pendant-sync.timer*
 **How freeing works, exactly.** After a download, the sync asks the pendant to delete pages only when all of these hold:
 
 - the saved files exist on disk and aren't empty;
-- the download started at the pendant's own oldest stored page, and covers at least as many pages as the pendant said it held (it asks the pendant first; if either check fails, nothing is deleted, and the next sync downloads those pages again and replaces the earlier copy);
+- the pendant reported its oldest stored page, and the download started exactly there and covers at least as many pages as it said it held (if the pendant doesn't report its oldest page, coverage can't be proven, so nothing is deleted and the next sync tries again);
 - it deletes only through the end of an unbroken run of pages: if a page went missing in the middle, everything from the gap on stays on the pendant;
 - it stops before any page the pendant flagged as unreadable, or that couldn't be parsed, so that page gets another try next time;
 - nothing is deleted if any audio couldn't be decrypted (those chunks are saved whole in a `.enc.jsonl` file).
+
+The pendant's reply to the delete request is logged separately: "the pendant confirmed", or "no confirmation", in which case the next sync's reported oldest page shows whether it happened.
+
+**When pages are downloaded twice.** If pages weren't freed, the next sync downloads them again under the same name. Each recording's `.json` records which pages it holds, and the copies are compared before anything is filed: an identical copy is dropped; a copy that provably holds every page of the old one and at least as much audio replaces it, and the old one (with its transcript) is moved to `~/recordings/.replaced/`, never deleted; anything else keeps both, the new one with `_r1` added. Filing copies first and removes the incoming file last, so an interruption never leaves zero copies.
 
 What this doesn't cover: the files are written with ordinary writes, so a power cut in the few seconds between saving and freeing could in theory lose that one sync's audio; the WAV is decoded after freeing (the `.opus` is what's kept, and the WAV can always be rebuilt from it); and the backup runs nightly, so until then the Pi holds the only copy. If that gap matters to you, keep `--delete-after` off (edit `~/.local/share/pendant/pendant-sync`) and clear the pendant by hand now and then.
 
@@ -227,6 +231,8 @@ echo "audio.key=$(base64 -w0 ~/.config/pendant/keys/audio.key)"
 
 Save that line somewhere private, like a password manager. Keep it off the cloud service you use for the backup.
 
+**Changing your key later.** If you ever run `pendant crypto setkey` again with a new key (`pendant crypto keygen --force` first), the old key files are kept in `~/.config/pendant/keys/previous/`, and downloads and `pendant crypto decrypt` try every kept key, newest first. Each recording's `.json` notes which key it used (`audio_key_id`, a fingerprint, not the key). Back up the whole `keys` folder, `previous` included.
+
 **Keep the Limitless app away from the pendant from now on.** If it connects, it may put its own key back. Nothing would be lost (those pages just stay on the pendant), but the Pi couldn't read them.
 
 ## 8. Transcripts
@@ -259,7 +265,7 @@ systemctl --user enable --now pendant-transcribe.timer
 
 On a Pi 4 it runs about 1.4× faster than real time for steady talking, and far faster through quiet stretches, so a full day finishes overnight. The pendant records only when it hears speech, so a quiet day gives a short transcript. That's expected.
 
-**Tidying up.** WAVs are about 15 times bigger than the compact `.opus` audio. After each nightly run, WAVs from more than 14 days ago are deleted, but only when that recording has a transcript and its `.opus` has just been test-decoded successfully, so a corrupt compact file never costs the playable copy. To listen to an old one again, rebuild it: `pendant decode ~/recordings/<day>/<file>.opus`. Each run also logs how much space is free and warns when the card is getting full. Keep WAVs longer (or shorter) with `PENDANT_KEEP_WAV_DAYS=30` in `~/.config/pendant/env`, or set it to `never`. `pendant transcribe --tidy` tidies right away.
+**Tidying up.** WAVs are about 15 times bigger than the compact `.opus` audio. After each nightly run, WAVs from more than 14 days ago are deleted, but only when that recording has a transcript and its `.opus` has just been rebuilt in full as a test (at least 98% of the WAV's length), so a damaged compact file never costs the playable copy. To listen to an old one again, rebuild it: `pendant decode ~/recordings/<day>/<file>.opus`. Each run also logs how much space is free and warns when the card is getting full. Keep WAVs longer (or shorter) with `PENDANT_KEEP_WAV_DAYS=30` in `~/.config/pendant/env`, or set it to `never`. `pendant transcribe --tidy` tidies right away.
 
 Settings, in `~/.config/pendant/env` or before the command: `PENDANT_WHISPER_MODEL` (`base.en` by default; `tiny.en` is faster, `small.en` more accurate but may not keep up on a Pi 4), `PENDANT_WHISPER_BEAM` (1; higher is slower and slightly more accurate).
 
@@ -412,7 +418,7 @@ That leaves your recordings (`~/recordings`) and keys (`~/.config/pendant`) alon
 
 ## What the pendant-cli patch changes
 
-`pendant-cli-fixes.patch` fixes how [pendant-cli](https://github.com/sdelcore/pendant-cli) reads the pendant and adds what this guide uses. Message layouts come from the Limitless Android app. It applies cleanly to upstream commit `1c71659` and passes pendant-cli's tests (102, including 20 for the page-freeing logic and 14 for encryption). The installer in step 6 applies it; it resets pendant-cli to its original files first (removing files an earlier version of the patch added), and only updates its own two lines in `~/.config/pendant/env`, so it's safe to rerun. Your own changes to pendant-cli's files, if any, would be lost.
+`pendant-cli-fixes.patch` fixes how [pendant-cli](https://github.com/sdelcore/pendant-cli) reads the pendant and adds what this guide uses. Message layouts come from the Limitless Android app. It applies cleanly to upstream commit `1c71659`, which the installer checks out so the code you run is the code that was tested, and passes pendant-cli's tests (108, including 23 for the page-freeing logic and 17 for encryption and keys). The installer in step 6 applies it; it resets pendant-cli to its original files first (removing files an earlier version of the patch added), and only updates its own two lines in `~/.config/pendant/env`, so it's safe to rerun. Your own changes to pendant-cli's files, if any, would be lost.
 
 **Reading the pendant correctly**
 - **Recording status** shows the real state: not recording, recording, or listening (armed to record when it hears speech), which pendant-cli used to print as `False`.
@@ -435,6 +441,9 @@ That leaves your recordings (`~/recordings`) and keys (`~/.config/pendant`) alon
 
 ## Developing
 
+Every push runs the tests on GitHub (`.github/workflows/tests.yml`): pendant-cli with the patch at the pinned revision, the Pi scripts, and the Android page's protocol code.
+
+
 - pendant-cli's tests, with the patch applied: `cd ~/pendant-cli && python -m pytest`
-- Transcription and browse-page tests (a stand-in model, no audio needed): `pip install pytest numpy faster-whisper`, then `pytest pi/tests`
+- Transcription, filing and browse-page tests (a stand-in model, no audio needed): `pip install pytest numpy`, then `pytest pi/tests`
 - The installers take a commit as their argument (`bash -s <commit>`), so you can pin an exact version. `main` is the latest; GitHub may serve a version up to 5 minutes old right after a change.

@@ -26,7 +26,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
 DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-FILE_RE = re.compile(r"^pendant_\d{8}_\d{6}$")
+FILE_RE = re.compile(r"^pendant_\d{8}_\d{6}(_r\d+)?$")
 LINE_RE = re.compile(r"^(★ )?\[(\d{2}:\d{2}:\d{2})\] (.*)$")
 NO_SPEECH = "(no speech found)"
 GAP_MINUTES = 10  # a pause this long starts a new conversation on the day page

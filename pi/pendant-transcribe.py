@@ -236,10 +236,12 @@ def check(wav: Path):
     return 0
 
 
-def opus_decodes(opus: Path, min_seconds=1.0):
-    """True if the compact audio really decodes (via `pendant decode` into a scratch file).
+def opus_decodes(opus: Path, expected_seconds=None, min_seconds=1.0):
+    """True if the compact audio decodes in full (via `pendant decode` into a scratch file).
 
-    A WAV is only deleted once this passes, so a corrupt .opus never costs the playable copy.
+    With expected_seconds (the WAV's length), the rebuilt audio must be at least 98% as long,
+    so a damaged file that only yields a short playable start doesn't pass. A WAV is only
+    deleted once this passes, so the .opus can always give it back.
     """
     import subprocess
     import tempfile
@@ -257,9 +259,21 @@ def opus_decodes(opus: Path, min_seconds=1.0):
         try:
             import wave
             with wave.open(str(out), "rb") as w:
-                return w.getnframes() / max(w.getframerate(), 1) >= min_seconds
+                got = w.getnframes() / max(w.getframerate(), 1)
         except (OSError, wave.Error, EOFError):
             return False
+        if expected_seconds:
+            return got >= 0.98 * expected_seconds
+        return got >= min_seconds
+
+
+def wav_seconds(wav: Path):
+    import wave
+    try:
+        with wave.open(str(wav), "rb") as w:
+            return w.getnframes() / max(w.getframerate(), 1)
+    except (OSError, wave.Error, EOFError):
+        return None
 
 
 def tidy(archive: Path, keep_days, today=None, verify=opus_decodes):
@@ -288,8 +302,8 @@ def tidy(archive: Path, keep_days, today=None, verify=opus_decodes):
             opus, txt = wav.with_suffix(".opus"), wav.with_suffix(".txt")
             if not (opus.is_file() and opus.stat().st_size > 0 and txt.is_file()):
                 continue  # not safe to delete: nothing to rebuild it from, or not transcribed yet
-            if not verify(opus):
-                log(f"  keeping {wav.name}: its .opus didn't decode cleanly")
+            if not verify(opus, wav_seconds(wav)):
+                log(f"  keeping {wav.name}: its .opus didn't decode in full")
                 continue
             size = wav.stat().st_size
             wav.unlink()

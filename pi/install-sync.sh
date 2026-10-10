@@ -31,6 +31,13 @@ PATCH="$(mktemp)"
 curl -fsSL "$BASE/pendant-cli-fixes.patch" -o "$PATCH"
 # Back to the original files: undo edits, and remove files an earlier version of the patch added.
 git checkout -- .
+# The patch is built and tested against this pendant-cli revision; use exactly that one.
+UPSTREAM=1c71659
+if ! git cat-file -e "$UPSTREAM^{commit}" 2>/dev/null; then git fetch -q origin; fi
+if [ "$(git rev-parse --short=7 HEAD)" != "$UPSTREAM" ]; then
+  say "Using pendant-cli revision $UPSTREAM (the one the patch is tested against)"
+  git checkout -q "$UPSTREAM"
+fi
 awk '/^diff --git /{f=$4} /^new file mode/{sub(/^b\//,"",f); print f}' "$PATCH" | while read -r f; do rm -f -- "$f"; done
 git apply "$PATCH"
 rm -f "$PATCH"
@@ -47,6 +54,7 @@ fi
 say "Installing pendant sync"
 mkdir -p "$HOME/.local/share/pendant" "$HOME/.config/pendant" "$HOME/.config/systemd/user" "$HOME/recordings"
 curl -fsSL "$BASE/pendant-sync" -o "$HOME/.local/share/pendant/pendant-sync"
+curl -fsSL "$BASE/pendant_file.py" -o "$HOME/.local/share/pendant/pendant_file.py"
 chmod +x "$HOME/.local/share/pendant/pendant-sync"
 rm -f "$HOME/.local/bin/pendant-sync"   # older installs put it here
 curl -fsSL "$BASE/pendant-sync.service" -o "$HOME/.config/systemd/user/pendant-sync.service"

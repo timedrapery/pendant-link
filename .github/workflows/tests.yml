@@ -1,0 +1,52 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pendant-cli-patch:
+    name: pendant-cli with the patch (pinned upstream)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Get pendant-cli at the pinned revision and apply the patch
+        run: |
+          git clone -q https://github.com/sdelcore/pendant-cli.git upstream
+          cd upstream
+          git checkout -q 1c71659
+          git apply ../pi/pendant-cli-fixes.patch
+      - name: Install test dependencies
+        run: pip install protobuf grpcio-tools click cryptography pynacl pytest
+      - name: Build message definitions
+        working-directory: upstream
+        run: python -m grpc_tools.protoc -I proto --python_out=proto proto/pendant.proto
+      - name: Run pendant-cli tests (deletion rules, encryption, keys, stars, timeline)
+        working-directory: upstream
+        run: PYTHONPATH=src:proto:tests python -m pytest -q
+
+  pi-scripts:
+    name: Pi scripts (transcription, filing, browse page)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest numpy
+      - run: python -m pytest -q pi/tests
+      - name: Shell scripts parse
+        run: for f in pi/*.sh pi/pendant-sync pi/pendant-backup; do bash -n "$f"; done
+
+  web-protocol:
+    name: Android connection test protocol
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: node --test

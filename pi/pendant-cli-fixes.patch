@@ -286,7 +286,7 @@ index fb98890..4c861ff 100644
  # Register command groups
  cli.add_command(bluetooth.bt)
 diff --git a/src/pendant/commands/audio.py b/src/pendant/commands/audio.py
-index cf0b2e6..81d6ff3 100644
+index cf0b2e6..f2791cf 100644
 --- a/src/pendant/commands/audio.py
 +++ b/src/pendant/commands/audio.py
 @@ -1,6 +1,7 @@
@@ -416,9 +416,16 @@ index cf0b2e6..81d6ff3 100644
          # Check if timestamps are real (synced) or just device uptime
          first_ts = client.page_timestamps[0].get("absolute_timestamp_ms", 0) if client.page_timestamps else 0
          timestamps_synced = first_ts > MIN_VALID_TIMESTAMP_MS
-@@ -103,19 +146,66 @@ def download(ctx, decode, output):
+@@ -102,20 +145,95 @@ def download(ctx, decode, output):
+             "download_time_iso": datetime.now().isoformat(),
              "timestamps_synced": timestamps_synced,
              "total_pages": client.page_count,
++            # Which pages this file holds, so a later re-download can be compared with it.
++            "page_first": min(client.page_indices) if client.page_indices else None,
++            "page_last": max(client.page_indices) if client.page_indices else None,
++            "page_count": len(set(client.page_indices)),
++            "bad_pages": sorted(set(getattr(client, "bad_page_indices", []))),
++            "audio_key_id": _key_id(client),
              "total_audio_bytes": len(client.opus_data),
 -            "pages": client.page_timestamps
 +            "pages": client.page_timestamps,
@@ -449,7 +456,10 @@ index cf0b2e6..81d6ff3 100644
 +        refusal = None
 +        if first is None:
 +            refusal = "Nothing downloaded, so nothing to delete."
-+        elif oldest is not None and first != oldest:
++        elif oldest is None:
++            refusal = ("The pendant didn't report its oldest page, so there's no proof this download "
++                       "started at the beginning. Nothing will be deleted; the next sync will try again.")
++        elif first != oldest:
 +            refusal = (f"The pendant's oldest page is {oldest} but the download started at {first}, "
 +                       "so nothing will be deleted. Everything stays on the pendant.")
 +        elif through is None:
@@ -467,10 +477,29 @@ index cf0b2e6..81d6ff3 100644
 +            saved_ok = all(f.exists() and f.stat().st_size > 0 for f in written) and bool(written)
 +            if had_audio and not saved_ok:
 +                raise click.ClickException("The audio wasn't saved, so nothing will be deleted from the pendant.")
-+            click.echo(f"Freeing pages through index {through} on the pendant...")
++            click.echo(f"Asking the pendant to free pages through index {through}...")
++            ack = {"reply": None, "id": None}
++            prior = getattr(client, "on_response", None)
++
++            def on_response(r):
++                if prior:
++                    prior(r)
++                if ack["id"] is not None and r.get("request_id") == ack["id"]:
++                    ack["reply"] = r
++                    client.stop()
++
++            client.on_response = on_response
 +            client.send_command("delete_flash_page", index=through)
-+            client.run_with_timeout(3)
-+            click.echo("Freed.")
++            ack["id"] = getattr(getattr(client, "protocol", None), "message_index", None)
++            client.run_with_timeout(5)
++            client.on_response = prior
++            reply = ack["reply"]
++            if reply is None:
++                click.echo("Freed (no confirmation from the pendant; the next sync's oldest page will show it).")
++            elif reply.get("response_success"):
++                click.echo("Freed (the pendant confirmed).")
++            else:
++                click.echo(f"The pendant refused to free pages: {reply.get('response_error')}. Everything stays on it.")
 +
      # Auto-decode opus to WAV if requested
      if decode and opus_fname and opus_fname.exists():
@@ -485,10 +514,18 @@ index cf0b2e6..81d6ff3 100644
          except Exception as e:
              click.echo(f"Decode failed: {e}")
              click.echo(f"  Manual: pendant decode {opus_fname}")
-@@ -123,6 +213,65 @@ def download(ctx, decode, output):
+@@ -123,6 +241,73 @@ def download(ctx, decode, output):
          click.echo(f"  Decode: pendant decode {opus_fname}")
  
  
++def _key_id(client):
++    keys = getattr(client, "private_key", None)
++    if not keys:
++        return None
++    from pendant.core.audiocrypto import key_id
++    return key_id(keys[0] if isinstance(keys, (list, tuple)) else keys)
++
++
 +def pendant_page_range(client):
 +    """(oldest page index the pendant reports, or None; pages it held before the download, or None).
 +
@@ -552,10 +589,10 @@ index cf0b2e6..81d6ff3 100644
  @click.argument('input_file', type=click.Path(exists=True))
  @click.argument('output_file', type=click.Path(), required=False)
 diff --git a/src/pendant/commands/crypto.py b/src/pendant/commands/crypto.py
-index cc35325..e15eac4 100644
+index cc35325..537bd44 100644
 --- a/src/pendant/commands/crypto.py
 +++ b/src/pendant/commands/crypto.py
-@@ -1,60 +1,164 @@
+@@ -1,60 +1,171 @@
 -"""Crypto commands: keygen, setkey."""
 +"""Crypto commands: keygen, setkey, status, decrypt.
 +
@@ -672,14 +709,11 @@ index cc35325..e15eac4 100644
 +            raise click.ClickException(f"The pendant's key isn't what we expected ({e}). Nothing was changed.")
 +
 +        # 2. Save the AES key BEFORE the pendant starts using it.
-+        old = KEYS_DIR / audiocrypto.AUDIO_KEY_FILE
-+        old_device = KEYS_DIR / audiocrypto.DEVICE_FILE
-+        if old.exists() and old_device.exists() and old_device.read_bytes() != device_raw:
-+            backup = old.with_name(f"audio.key.{time.strftime('%Y%m%d_%H%M%S')}")
-+            shutil.copy2(old, backup)
-+            click.echo(f"Kept the previous audio key as {backup.name} (for recordings made with it).")
-+        audiocrypto.save_audio_key(device_raw)
-+        click.echo(f"Saved your audio key: {old}")
++        before = audiocrypto.load_audio_key()
++        key = audiocrypto.save_audio_key(device_raw)  # keeps the previous generation if it differs
++        if before is not None and before != key:
++            click.echo(f"Kept the previous audio key in {KEYS_DIR / 'previous'} (for recordings made with it).")
++        click.echo(f"Saved your audio key: {KEYS_DIR / audiocrypto.AUDIO_KEY_FILE} (id {audiocrypto.key_id(key)})")
 +
 +        # 3. Send our public key.
 +        click.echo("Sending your public key to the pendant...")
@@ -717,6 +751,11 @@ index cc35325..e15eac4 100644
 +                        (audiocrypto.DEVICE_FILE, "Pendant's key"),
 +                        (audiocrypto.AUDIO_KEY_FILE, "Audio key")]:
 +        click.echo(f"  {label}: {'yes' if (d / name).exists() else 'no'}")
++    keys = audiocrypto.load_all_audio_keys()
++    if keys:
++        click.echo(f"  Audio key id: {audiocrypto.key_id(keys[0])}")
++        if len(keys) > 1:
++            click.echo(f"  Earlier key generations kept: {len(keys) - 1} (in {d / 'previous'})")
  
 -    GLib.timeout_add_seconds(2, lambda: client.stop() or False)
 -    client.run_with_timeout(5)
@@ -730,18 +769,23 @@ index cc35325..e15eac4 100644
 +@click.option('--key', 'key_file', type=click.Path(exists=True), help='Audio key file (default: your current audio.key).')
 +def decrypt(enc_file, key_file):
 +    """Decrypt a saved .enc.jsonl into .opus (it keeps the original)."""
-+    key = Path(key_file).read_bytes() if key_file else audiocrypto.load_audio_key()
-+    if not key or len(key) != 16:
++    keys = [Path(key_file).read_bytes()] if key_file else audiocrypto.load_all_audio_keys()
++    keys = [k for k in keys if len(k) == 16]
++    if not keys:
 +        raise click.ClickException("No 16-byte audio key found.")
 +    out, bad = bytearray(), 0
 +    lines = [l for l in Path(enc_file).read_text().splitlines() if l.strip()]
 +    for line in lines:
 +        r = json.loads(line)
 +        nonce, ct, tag = bytes.fromhex(r["nonce"]), bytes.fromhex(r["ciphertext"]), bytes.fromhex(r["tag"])
-+        pt = audiocrypto.decrypt_chunk(key, nonce, ct, tag)
-+        if pt is None and r.get("layout") != "app":
-+            # Saved by an earlier version that read nonce and ciphertext the wrong way round.
-+            pt = audiocrypto.decrypt_chunk(key, ct, nonce, tag)
++        pt = None
++        for key in keys:  # current key first, then earlier generations
++            pt = audiocrypto.decrypt_chunk(key, nonce, ct, tag)
++            if pt is None and r.get("layout") != "app":
++                # Saved by an earlier version that read nonce and ciphertext the wrong way round.
++                pt = audiocrypto.decrypt_chunk(key, ct, nonce, tag)
++            if pt is not None:
++                break
 +        if pt is None:
 +            bad += 1
 +        else:
@@ -933,10 +977,10 @@ index 0000000..9fe237a
 +    os.execv(str(python), [str(python), str(script), *args])
 diff --git a/src/pendant/core/audiocrypto.py b/src/pendant/core/audiocrypto.py
 new file mode 100644
-index 0000000..536d62c
+index 0000000..d6f99a2
 --- /dev/null
 +++ b/src/pendant/core/audiocrypto.py
-@@ -0,0 +1,129 @@
+@@ -0,0 +1,180 @@
 +"""Audio encryption, matching the Limitless app (index.android.bundle, v2.1.6).
 +
 +The pendant holds its own P-256 key pair and reports the public half in
@@ -957,6 +1001,9 @@ index 0000000..536d62c
 +
 +audio.key alone is enough to decrypt. Losing it means recordings still on the
 +pendant can't be read, so back it up.
++
++Earlier key generations are kept in KEYS_DIR/previous/<time>/ whenever a key would be
++replaced, and downloads and `pendant crypto decrypt` try them after the current key.
 +"""
 +
 +from pathlib import Path
@@ -972,6 +1019,49 @@ index 0000000..536d62c
 +
 +def _keys_dir(keys_dir: Optional[Path]) -> Path:
 +    return Path(keys_dir) if keys_dir else KEYS_DIR
++
++
++def key_id(key: bytes) -> str:
++    """A short fingerprint of an audio key (not the key), saved with each recording."""
++    import hashlib
++    return hashlib.sha256(b"pendant-audio-key:" + key).hexdigest()[:12]
++
++
++def preserve_current_keys(keys_dir: Optional[Path] = None) -> Optional[Path]:
++    """Copy every current key file to previous/<time>/ before anything replaces it."""
++    import shutil
++    import time
++
++    d = _keys_dir(keys_dir)
++    present = [d / n for n in (PRIVATE_FILE, PUBLIC_FILE, DEVICE_FILE, AUDIO_KEY_FILE) if (d / n).exists()]
++    if not present:
++        return None
++    dest = d / "previous" / time.strftime("%Y%m%d_%H%M%S")
++    n = 1
++    while dest.exists():
++        dest = dest.with_name(f"{dest.name.split('-')[0]}-{n}")
++        n += 1
++    dest.mkdir(parents=True)
++    dest.chmod(0o700)
++    for f in present:
++        shutil.copy2(f, dest / f.name)
++    return dest
++
++
++def load_all_audio_keys(keys_dir: Optional[Path] = None) -> list:
++    """The current audio key first, then earlier generations, newest first."""
++    d = _keys_dir(keys_dir)
++    keys = []
++    current = load_audio_key(d)
++    if current:
++        keys.append(current)
++    prev = d / "previous"
++    if prev.is_dir():
++        for gen in sorted(prev.iterdir(), reverse=True):
++            k = gen / AUDIO_KEY_FILE
++            if k.is_file() and len(k.read_bytes()) == 16 and k.read_bytes() not in keys:
++                keys.append(k.read_bytes())
++    return keys
 +
 +
 +def _write_private(path: Path, data: bytes):
@@ -990,6 +1080,8 @@ index 0000000..536d62c
 +    private_path = d / PRIVATE_FILE
 +    if private_path.exists() and not force:
 +        raise FileExistsError(str(private_path))
++    if private_path.exists():
++        preserve_current_keys(d)  # --force: keep the old generation recoverable
 +
 +    key = ec.generate_private_key(ec.SECP256R1())
 +    pem = key.private_bytes(
@@ -1036,6 +1128,9 @@ index 0000000..536d62c
 +    d = _keys_dir(keys_dir)
 +    private_key = serialization.load_pem_private_key((d / PRIVATE_FILE).read_bytes(), password=None)
 +    key = derive_audio_key(private_key, device_public_raw)
++    current = load_audio_key(d)
++    if current is not None and current != key:
++        preserve_current_keys(d)  # a different audio key: keep the old one for old recordings
 +    (d / DEVICE_FILE).write_bytes(device_public_raw)
 +    _write_private(d / AUDIO_KEY_FILE, key)
 +    return key
@@ -1245,7 +1340,7 @@ index 0a797ea..16d9f6b 100644
              offset += frame_size
              frame_count += 1
 diff --git a/src/pendant/core/protocol.py b/src/pendant/core/protocol.py
-index c342f7e..3317c51 100644
+index c342f7e..af6c93a 100644
 --- a/src/pendant/core/protocol.py
 +++ b/src/pendant/core/protocol.py
 @@ -10,12 +10,46 @@ from .config import KEYS_DIR
@@ -1420,7 +1515,7 @@ index c342f7e..3317c51 100644
                  # Chunk is not a oneof - check if audio_data field is populated
                  has_audio = chunk.HasField('audio_data') if hasattr(chunk, 'HasField') else bool(chunk.audio_data.ByteSize())
  
-@@ -339,82 +383,127 @@ class PendantProtocol:
+@@ -339,82 +383,132 @@ class PendantProtocol:
                          if DEBUG_MODE:
                              print(f"        encrypted: ciphertext={len(enc.ciphertext)}B, nonce={len(enc.nonce)}B, tag={len(enc.tag)}B")
  
@@ -1460,7 +1555,8 @@ index c342f7e..3317c51 100644
 -    def _decrypt_audio(self, encrypted, private_key) -> Optional[bytes]:
 -        """Decrypt encrypted audio data using our private key."""
 +    def _decrypt_audio(self, encrypted, key) -> Optional[bytes]:
-+        """AES-128-GCM with the key from 'pendant crypto setkey'. None if it doesn't verify."""
++        """AES-128-GCM with the key from 'pendant crypto setkey' (or a list: current first,
++        then earlier generations). None if no key verifies."""
          try:
 -            from nacl.public import SealedBox
 -
@@ -1476,7 +1572,11 @@ index c342f7e..3317c51 100644
 -                # Try without combining
 -                return box.decrypt(encrypted.ciphertext)
 +            from .audiocrypto import decrypt_chunk
-+            return decrypt_chunk(key, bytes(encrypted.nonce), bytes(encrypted.ciphertext), bytes(encrypted.tag))
++            for k in (key if isinstance(key, (list, tuple)) else [key]):
++                out = decrypt_chunk(k, bytes(encrypted.nonce), bytes(encrypted.ciphertext), bytes(encrypted.tag))
++                if out is not None:
++                    return out
++            return None
          except Exception as e:
              if DEBUG_MODE:
                  print(f"        Decryption failed: {e}")
@@ -1503,8 +1603,6 @@ index c342f7e..3317c51 100644
 -    except ImportError:
 -        print("Error: pynacl not installed. Run: pip install pynacl")
 -        return None, None
--
--    KEYS_DIR.mkdir(parents=True, exist_ok=True)
 +def format_status_lines(st: dict) -> list:
 +    """Human-readable lines for a flattened DeviceStatus."""
 +    lines = []
@@ -1562,9 +1660,11 @@ index c342f7e..3317c51 100644
 +        end = i
 +    return end
  
+-    KEYS_DIR.mkdir(parents=True, exist_ok=True)
+ 
 -    private_key = PrivateKey.generate()
 -    public_key = private_key.public_key
- 
+-
 -    # Save keys
 -    private_file = KEYS_DIR / "private.key"
 -    public_file = KEYS_DIR / "public.key"
@@ -1577,9 +1677,9 @@ index c342f7e..3317c51 100644
 -
 -    return private_file, public_file
 +def load_private_key():
-+    """The AES key saved by 'pendant crypto setkey', or None. (Kept under the old name.)"""
-+    from .audiocrypto import load_audio_key
-+    return load_audio_key()
++    """Audio keys saved by 'pendant crypto setkey', current first, or None. (Old name kept.)"""
++    from .audiocrypto import load_all_audio_keys
++    return load_all_audio_keys() or None
 +
 +
 +def build_timeline(pages, frame_map, sample_rate=16000):
@@ -1633,10 +1733,10 @@ index cdd3ff3..3b84f90 100644
      status.storage_state.CopyFrom(storage)
 diff --git a/tests/test_audiocrypto.py b/tests/test_audiocrypto.py
 new file mode 100644
-index 0000000..f31f7b9
+index 0000000..cc2b137
 --- /dev/null
 +++ b/tests/test_audiocrypto.py
-@@ -0,0 +1,231 @@
+@@ -0,0 +1,263 @@
 +"""Audio encryption: the Limitless app's scheme, and never freeing what we can't read."""
 +
 +import json
@@ -1868,6 +1968,38 @@ index 0000000..f31f7b9
 +    proto = PendantProtocol()
 +    _, _, _, _, info = proto.extract_audio_from_flash_page(b"\xff\xfe\xfd garbage that is not a FlashPage")
 +    assert info.get("parse_failed") is True
++
++
++def test_rotating_owner_key_on_same_pendant_keeps_old_recordings_readable(tmp_path):
++    """Record under key A, rotate to B on the same pendant, decrypt both."""
++    device = ec.generate_private_key(ec.SECP256R1())
++    dev_raw = _raw(device.public_key())
++    audiocrypto.generate_keypair(keys_dir=tmp_path)
++    key_a = audiocrypto.save_audio_key(dev_raw, keys_dir=tmp_path)
++    page_a = _page(key_a, [b"made with A"])
++    audiocrypto.generate_keypair(keys_dir=tmp_path, force=True)      # new owner key, same pendant
++    key_b = audiocrypto.save_audio_key(dev_raw, keys_dir=tmp_path)
++    assert key_a != key_b
++    page_b = _page(key_b, [b"made with B"])
++    keys = audiocrypto.load_all_audio_keys(keys_dir=tmp_path)
++    assert keys[0] == key_b and key_a in keys
++    proto = PendantProtocol()
++    assert proto.extract_audio_from_flash_page(page_a, keys)[0] == b"made with A"
++    assert proto.extract_audio_from_flash_page(page_b, keys)[0] == b"made with B"
++    assert proto.undecrypted == []
++
++
++def test_same_key_again_makes_no_extra_generation(tmp_path, pendant_and_keys):
++    device, _, key = pendant_and_keys
++    again = audiocrypto.save_audio_key(_raw(device.public_key()), keys_dir=tmp_path)
++    assert again == key
++    assert not (tmp_path / "previous").exists()
++
++
++def test_key_id_is_short_and_not_the_key(pendant_and_keys):
++    _, _, key = pendant_and_keys
++    kid = audiocrypto.key_id(key)
++    assert len(kid) == 12 and key.hex()[:12] != kid
 diff --git a/tests/test_protocol.py b/tests/test_protocol.py
 index ad39d00..20fbd8c 100644
 --- a/tests/test_protocol.py
@@ -2034,10 +2166,10 @@ index 0000000..0943e9e
 +    assert result.exit_code != 0 and "install-transcribe.sh" in result.output
 diff --git a/tests/test_sync_safety.py b/tests/test_sync_safety.py
 new file mode 100644
-index 0000000..646714d
+index 0000000..6bdd2af
 --- /dev/null
 +++ b/tests/test_sync_safety.py
-@@ -0,0 +1,186 @@
+@@ -0,0 +1,214 @@
 +"""Safety tests for freeing pages on the pendant after a download."""
 +import click
 +import pytest
@@ -2074,8 +2206,13 @@ index 0000000..646714d
 +    assert cmd.delete_flash_page.older_than_or_equal_to_index == 1234
 +
 +
++_UNSET = object()
++
++
 +class FakeClient:
-+    def __init__(self, indices, opus=b"\x01" * 50, oldest=None, bad=()):
++    def __init__(self, indices, opus=b"\x01" * 50, oldest=_UNSET, bad=()):
++        if oldest is _UNSET:  # by default the pendant reports the first page we got
++            oldest = min(indices) if len(list(indices)) else None
 +        self.page_count = len(indices)
 +        self.page_indices = list(indices)
 +        self.page_errors = len(bad)
@@ -2209,7 +2346,30 @@ index 0000000..646714d
 +    c.device_info = {"oldest_flash_page": 0, "newest_flash_page": 0}
 +    c.first_status = {"storage_used_pages": 156, "oldest_flash_page": 0, "newest_flash_page": 0}
 +    _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=True)
-+    assert c.sent == [("delete_flash_page", {"index": 5326})]
++    assert c.sent == []  # oldest page unreported: coverage can't be proven, keep everything
++
++
++def test_real_pendant_after_fix(tmp_path):
++    """Oct 10, 16:31: storage status reported oldest 5162, 1931 pages; download 5162-7133."""
++    c = FakeClient(range(5162, 7134))
++    c.device_info = {"oldest_flash_page": 0, "newest_flash_page": 0}
++    c.first_status = {"storage_used_pages": 1931, "oldest_flash_page": 5162, "newest_flash_page": 7092}
++    _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=True)
++    assert c.sent == [("delete_flash_page", {"index": 7133})]
++
++
++def test_count_alone_never_allows_deletion(tmp_path):
++    """Brief case: count 3, oldest unknown, got 101-103 (page 100 may be missing)."""
++    c = FakeClient([101, 102, 103], oldest=None)
++    c.first_status = {"storage_used_pages": 3}
++    _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=True)
++    assert c.sent == []
++
++
++def test_no_oldest_and_no_count_deletes_nothing(tmp_path):
++    c = FakeClient([101, 102], oldest=None)
++    _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=True)
++    assert c.sent == []
 +
 +
 +def test_oldest_page_from_storage_status(tmp_path):
@@ -2220,7 +2380,7 @@ index 0000000..646714d
 +
 +
 +def test_too_few_pages_for_what_the_pendant_held(tmp_path):
-+    c = FakeClient(range(5162, 5200))  # 38 pages
-+    c.first_status = {"storage_used_pages": 156}
++    c = FakeClient(range(5162, 5200), oldest=5162)  # 38 pages
++    c.first_status = {"storage_used_pages": 156, "oldest_flash_page": 5162, "newest_flash_page": 5300}
 +    _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=True)
 +    assert c.sent == []
