@@ -1,0 +1,28 @@
+# Raspberry Pi notes
+
+## pendant-cli fixes
+
+`pendant-cli-fixes.patch` corrects how [pendant-cli](https://github.com/sdelcore/pendant-cli) reads three pendant messages, using the field layouts from the Limitless Android app:
+
+- **Recording status** shows the real state: not recording, recording, or listening. The pendant reports "listening" when it's armed to record on speech, which pendant-cli used to print as `False`.
+- **Storage** shows pages used out of total, with one decimal of percent. It used to round small amounts down to 0%.
+- **Button events** show the press type (short, double, long, short plus super-long) and press counts since boot.
+- **Device info** (`pendant info`) shows firmware, serial, device ID, Bluetooth address, flash pages, and whether an audio encryption key is set.
+- **Wi-Fi status** uses the real layout (state, signal, uptime, network name).
+- Messages that fail to decode are printed instead of silently dropped.
+- The docs' `protoc` command gains `-I proto`, so the generated file lands in `proto/`.
+
+It applies cleanly to upstream commit `1c71659` and passes pendant-cli's test suite (26 tests).
+
+### Apply on the Pi
+
+```
+cd ~/pendant-cli
+curl -sL https://raw.githubusercontent.com/timedrapery/pendant-link/main/pi/pendant-cli-fixes.patch | git apply
+protoc -I proto --python_out=proto proto/pendant.proto
+cd ~
+```
+
+The `protoc` line regenerates the message definitions, which the patch changes. Then try `pendant status`, `pendant info`, and `pendant listen`.
+
+To undo: `cd ~/pendant-cli && git checkout -- . && protoc -I proto --python_out=proto proto/pendant.proto`

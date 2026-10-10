@@ -1,0 +1,464 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index dd63bcd..d61dbe7 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -13,7 +13,7 @@ Python CLI for communicating with the Limitless Pendant BLE device. Uses Protoco
+ nix develop
+ 
+ # Regenerate protobuf (if proto/pendant.proto changes)
+-protoc --python_out=proto proto/pendant.proto
++protoc -I proto --python_out=proto proto/pendant.proto
+ ```
+ 
+ ## Build & Run Commands
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 031a41f..a3b2ebe 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -39,7 +39,7 @@ pendant explore             # Explore GATT services
+ pendant debug               # Download with detailed flash page inspection
+ 
+ # Regenerate protobuf (if proto/pendant.proto changes)
+-protoc --python_out=proto proto/pendant.proto
++protoc -I proto --python_out=proto proto/pendant.proto
+ ```
+ 
+ ## Architecture
+diff --git a/README.md b/README.md
+index bd3dc3e..8adee21 100644
+--- a/README.md
++++ b/README.md
+@@ -184,7 +184,7 @@ without their private key. Only new recordings after `setkey` will use your key.
+ 
+ Generate protobuf Python code:
+ ```bash
+-protoc --python_out=proto proto/pendant.proto
++protoc -I proto --python_out=proto proto/pendant.proto
+ ```
+ 
+ The protobuf definitions are in `proto/pendant.proto`, derived from the decompiled
+diff --git a/flake.nix b/flake.nix
+index e21933f..d005482 100644
+--- a/flake.nix
++++ b/flake.nix
+@@ -44,7 +44,7 @@
+             # Generate protobuf if needed
+             if [ ! -f proto/pendant_pb2.py ] && [ -f proto/pendant.proto ]; then
+               echo "Generating protobuf Python code..."
+-              protoc --python_out=proto proto/pendant.proto 2>/dev/null || true
++              protoc -I proto --python_out=proto proto/pendant.proto 2>/dev/null || true
+             fi
+ 
+             # Sync dependencies with uv
+diff --git a/proto/pendant.proto b/proto/pendant.proto
+index 22b2dea..bcf2dd3 100644
+--- a/proto/pendant.proto
++++ b/proto/pendant.proto
+@@ -124,12 +124,24 @@ message PendantAllMsg {
+   optional ResponseData response_data = 6;
+ }
+ 
++// Field layout from the Limitless Android app (ServerProto$DeviceInfoMsg).
+ message DeviceInfoMsg {
+-  string firmware_version = 1;
+-  string hardware_version = 2;
+-  string serial_number = 3;
+-  bytes mac_address = 4;
+-  string device_name = 5;
++  uint64 device_id = 1;
++  string serial_number = 2;
++  string firmware_version = 3;
++  int32 storage_version = 4;
++  int64 storage_instance = 5;
++  int32 storage_run = 6;
++  bytes wifi_mac_address1 = 7;
++  bytes wifi_mac_address2 = 8;
++  bytes ble_mac_address = 9;
++  int32 oldest_flash_page = 10;
++  int32 newest_flash_page = 11;
++  int32 battery_percent = 12;
++  // 13: SetDebugFeatures debug_features (not decoded here)
++  DeviceStatus device_status = 14;
++  bytes device_audio_encryption_pub_key = 15;
++  int32 factory_reset_id = 16;
+ }
+ 
+ message StorageBufferMsg {
+@@ -212,7 +224,24 @@ message BatteryStatus {
+   bool under_operating_temperature = 8;
+   UsbState usb_state = 9;
+ }
+-message ButtonStatus { bool pressed = 1; }
++// Field layout from the Limitless Android app (SharedProto$ButtonStatus).
++enum ButtonEvent {
++  BUTTON_NOT_PRESSED = 0;
++  BUTTON_SHORT_PRESS = 1;
++  BUTTON_LONG_PRESS = 2;
++  BUTTON_DOUBLE_PRESS = 3;
++  BUTTON_SHORT_AND_SUPER_LONG_PRESS = 4;
++}
++message ButtonStatus {
++  ButtonEvent button_event = 1;
++  bool physical_button = 2;
++  int32 num_short_presses_since_boot = 3;
++  int32 num_long_presses_since_boot = 4;
++  int32 num_double_presses_since_boot = 5;
++  int64 button_event_absolute_timestamp_ms = 6;
++  int32 short_press_duration_ms = 7;
++  int32 long_press_duration_ms = 8;
++}
+ message RealTimeAudioDataResponse { bytes data = 1; int64 seq = 2; }
+ message RealTimeAudioAckResponse { int64 seq = 1; }
+ message ResponseData { int32 request_id = 1; bool success = 2; }
+@@ -258,10 +287,18 @@ message Chunk {
+ }
+ 
+ // Additional status messages for Chunk
++// Field layout from the Limitless Android app (SharedProto$WifiStatus).
++enum WifiState {
++  WIFI_DISCONNECTED = 0;
++  WIFI_CONNECTING = 1;
++  WIFI_CONNECTED = 2;
++  WIFI_INIT_ERROR = 3;
++}
+ message WifiStatus {
+-  bool connected = 1;
+-  string ssid = 2;
+-  int32 rssi = 3;
++  WifiState state = 1;
++  int32 rssi = 2;
++  int32 uptime = 3;
++  string ssid = 4;
+ }
+ 
+ message BleStatus {
+diff --git a/src/pendant/commands/device.py b/src/pendant/commands/device.py
+index e05b050..fea1233 100644
+--- a/src/pendant/commands/device.py
++++ b/src/pendant/commands/device.py
+@@ -76,18 +76,20 @@ def listen(ctx, timeout):
+         timestamp = datetime.now().strftime("%H:%M:%S")
+         
+         if rtype == "button_status":
+-            pressed = response.get("pressed", False)
+-            action = "pressed" if pressed else "released"
+-            click.echo(f"[{timestamp}] Button {action}")
++            label = response.get("event_label", "pressed")
++            counts = (f"short {response.get('short_presses', 0)}, double {response.get('double_presses', 0)}, "
++                      f"long {response.get('long_presses', 0)} since boot")
++            click.echo(f"[{timestamp}] Button: {label} ({counts})")
+         elif rtype == "battery_status":
+             level = response.get("level", 0)
+             charging = response.get("charging", False)
+             status = "charging" if charging else "discharging"
+             click.echo(f"[{timestamp}] Battery: {level}% ({status})")
+         elif rtype == "device_status":
+-            recording = response.get("is_recording", False)
+-            storage = response.get("storage_used_percent", 0)
+-            click.echo(f"[{timestamp}] Status: recording={recording}, storage={storage}%")
++            recording = response.get("recording_label", "unknown")
++            used, total = response.get("storage_used_pages"), response.get("storage_total_pages")
++            storage = f"{used}/{total} pages" if used is not None and total else "unknown"
++            click.echo(f"[{timestamp}] Status: {recording}, storage {storage}")
+         elif rtype and rtype != "parse_error":
+             click.echo(f"[{timestamp}] Event: {rtype}")
+ 
+diff --git a/src/pendant/core/bleak_client.py b/src/pendant/core/bleak_client.py
+index 5278f23..ca072c2 100644
+--- a/src/pendant/core/bleak_client.py
++++ b/src/pendant/core/bleak_client.py
+@@ -3,7 +3,7 @@
+ from typing import Optional, Callable
+ 
+ from .config import DEFAULT_PENDANT_ADDRESS, CONTROL_UUID, AUDIO_DATA_UUID, PREFERRED_MTU
+-from .protocol import PendantProtocol
++from .protocol import PendantProtocol, format_device_info_lines, format_status_lines
+ 
+ 
+ class BleakClient:
+@@ -41,13 +41,14 @@ class BleakClient:
+         self.responses.append(rtype)
+ 
+         if rtype == "device_info":
+-            print(f"\n  Device: {response.get('device_name', 'Unknown')}")
+-            print(f"  Firmware: {response.get('firmware_version', '?')}")
+-            print(f"  Hardware: {response.get('hardware_version', '?')}")
++            print()
++            for line in format_device_info_lines(response):
++                print(line)
+ 
+         elif rtype == "device_status":
+-            print(f"\n  Recording: {response.get('is_recording', False)}")
+-            print(f"  Storage: {response.get('storage_used_percent', 0)}%")
++            print()
++            for line in format_status_lines(response):
++                print(line)
+ 
+         elif rtype == "battery_status":
+             print(f"\n  Battery: {response.get('level', 0)}%")
+diff --git a/src/pendant/core/dbus_client.py b/src/pendant/core/dbus_client.py
+index a5867ef..39448a6 100644
+--- a/src/pendant/core/dbus_client.py
++++ b/src/pendant/core/dbus_client.py
+@@ -4,7 +4,7 @@ import subprocess
+ from typing import Optional, Callable
+ 
+ from .config import DEFAULT_PENDANT_ADDRESS, CONTROL_UUID, AUDIO_DATA_UUID
+-from .protocol import PendantProtocol, DEBUG_MODE
++from .protocol import PendantProtocol, DEBUG_MODE, format_device_info_lines, format_status_lines
+ from .bluetooth import ensure_connected
+ 
+ 
+@@ -75,18 +75,16 @@ class DBusClient:
+ 
+         if rtype == "device_info":
+             if not self._info_printed:
+-                print(f"\n  Device: {response.get('device_name', 'Unknown')}")
+-                print(f"  Firmware: {response.get('firmware_version', '?')}")
+-                print(f"  Hardware: {response.get('hardware_version', '?')}")
+-                print(f"  Serial: {response.get('serial_number', '?')}")
++                print()
++                for line in format_device_info_lines(response):
++                    print(line)
+                 self._info_printed = True
+ 
+         elif rtype == "device_status":
+             if not self._status_printed:
+-                is_recording = response.get('is_recording', False)
+-                print(f"\n  Recording: {is_recording}")
+-                print(f"  Storage: {response.get('storage_used_percent', 0)}%")
+-                print(f"  (LED is authoritative: solid white = recording)")
++                print()
++                for line in format_status_lines(response):
++                    print(line)
+                 self._status_printed = True
+ 
+         elif rtype == "battery_status":
+@@ -114,7 +112,10 @@ class DBusClient:
+                 enc_str = f" enc={len(self.encrypted_data)}B" if self.encrypted_data else ""
+                 print(f"\r  Page {self.page_count}: opus={len(self.opus_data)}B pcm={len(self.pcm_data)}B{enc_str}", end="", flush=True)
+ 
+-        elif rtype and rtype != "parse_error":
++        elif rtype == "parse_error":
++            print(f"\n  Could not decode a message: {response.get('error')} (raw {response.get('raw', '')[:80]})")
++
++        elif rtype and rtype != "button_status":
+             print(f"\n  Response: {rtype}")
+ 
+         if self.on_response:
+diff --git a/src/pendant/core/protocol.py b/src/pendant/core/protocol.py
+index c342f7e..1918488 100644
+--- a/src/pendant/core/protocol.py
++++ b/src/pendant/core/protocol.py
+@@ -10,6 +10,36 @@ from .config import KEYS_DIR
+ DEBUG_MODE = False
+ 
+ 
++RECORDING_STATE_LABELS = {0: "not recording", 1: "recording", 2: "listening (records when it hears speech)"}
++BUTTON_EVENT_LABELS = {0: "released", 1: "short press", 2: "long press", 3: "double press", 4: "short + super-long press"}
++WIFI_STATE_LABELS = {0: "disconnected", 1: "connecting", 2: "connected", 3: "init error"}
++
++
++def _status_dict(status) -> dict:
++    """Flatten a DeviceStatus message (field layout from the Limitless Android app)."""
++    out = {"is_recording": False, "recording_state": None, "recording_label": "unknown",
++           "storage_used_percent": 0.0, "storage_used_pages": None, "storage_total_pages": None,
++           "wifi_connected": False, "wifi_label": "unknown"}
++    if status.HasField("recording_status"):
++        state = status.recording_status.recording_state
++        out["recording_state"] = state
++        out["recording_label"] = RECORDING_STATE_LABELS.get(state, f"state {state}")
++        out["is_recording"] = state == 1
++    if status.HasField("storage_state"):
++        total = status.storage_state.total_capture_pages
++        free = status.storage_state.free_capture_pages
++        if total > 0:
++            used = max(total - free, 0)
++            out["storage_used_pages"] = used
++            out["storage_total_pages"] = total
++            out["storage_used_percent"] = round(used / total * 100, 1)
++    if status.HasField("wifi_status"):
++        w = status.wifi_status.state
++        out["wifi_connected"] = w == 2
++        out["wifi_label"] = WIFI_STATE_LABELS.get(w, f"state {w}")
++    return out
++
++
+ class PendantProtocol:
+     """Implements the Pendant BLE protocol (protobuf encoding/decoding)."""
+ 
+@@ -166,39 +196,21 @@ class PendantProtocol:
+             if content_type == "device_info":
+                 info = msg.device_info
+                 result.update({
+-                    "firmware_version": info.firmware_version,
+-                    "hardware_version": info.hardware_version,
++                    "device_id": info.device_id,
+                     "serial_number": info.serial_number,
+-                    "device_name": info.device_name,
++                    "firmware_version": info.firmware_version,
++                    "battery_percent": info.battery_percent,
++                    "oldest_flash_page": info.oldest_flash_page,
++                    "newest_flash_page": info.newest_flash_page,
++                    "factory_reset_id": info.factory_reset_id,
++                    "ble_mac_address": ":".join(f"{b:02X}" for b in info.ble_mac_address),
++                    "has_audio_encryption_key": bool(info.device_audio_encryption_pub_key),
+                 })
++                if info.HasField("device_status"):
++                    result["status"] = _status_dict(info.device_status)
+ 
+             elif content_type == "device_status":
+-                status = msg.device_status
+-
+-                # Extract recording status from field 7 (DeviceRecordingStatus)
+-                # recording_state: 0=NOT_RECORDING, 1=RECORDING, 2=LISTENING
+-                is_recording = False
+-                if status.HasField('recording_status'):
+-                    is_recording = status.recording_status.recording_state == 1
+-
+-                # Calculate storage percentage from field 5 (StorageState)
+-                storage_percent = 0
+-                if status.HasField('storage_state'):
+-                    total = status.storage_state.total_capture_pages
+-                    free = status.storage_state.free_capture_pages
+-                    if total > 0:
+-                        storage_percent = int((total - free) / total * 100)
+-
+-                # Extract wifi status from field 1 (WifiStatus)
+-                wifi_connected = False
+-                if status.HasField('wifi_status'):
+-                    wifi_connected = status.wifi_status.connected
+-
+-                result.update({
+-                    "is_recording": is_recording,
+-                    "storage_used_percent": storage_percent,
+-                    "wifi_connected": wifi_connected,
+-                })
++                result.update(_status_dict(msg.device_status))
+ 
+             elif content_type == "storage_buffer":
+                 buf = msg.storage_buffer
+@@ -232,8 +244,14 @@ class PendantProtocol:
+                 })
+ 
+             elif content_type == "button_status":
++                btn = msg.button_status
+                 result.update({
+-                    "pressed": msg.button_status.pressed,
++                    "event": btn.button_event,
++                    "event_label": BUTTON_EVENT_LABELS.get(btn.button_event, f"event {btn.button_event}"),
++                    "pressed": btn.button_event != 0,
++                    "short_presses": btn.num_short_presses_since_boot,
++                    "long_presses": btn.num_long_presses_since_boot,
++                    "double_presses": btn.num_double_presses_since_boot,
+                 })
+ 
+             # Extract response_data if present
+@@ -381,6 +399,37 @@ class PendantProtocol:
+             return None
+ 
+ 
++def format_status_lines(st: dict) -> list:
++    """Human-readable lines for a flattened DeviceStatus."""
++    lines = [f"  Recording: {st.get('recording_label', 'unknown')}"]
++    used, total = st.get("storage_used_pages"), st.get("storage_total_pages")
++    if used is not None and total:
++        lines.append(f"  Storage: {used} of {total} pages used ({st.get('storage_used_percent', 0)}%)")
++    else:
++        lines.append("  Storage: unknown")
++    if st.get("wifi_label") not in (None, "unknown"):
++        lines.append(f"  Wi-Fi: {st['wifi_label']}")
++    return lines
++
++
++def format_device_info_lines(info: dict) -> list:
++    """Human-readable lines for a decoded DeviceInfoMsg."""
++    lines = [
++        f"  Firmware: {info.get('firmware_version') or '?'}",
++        f"  Serial: {info.get('serial_number') or '?'}",
++        f"  Device ID: {info.get('device_id', '?')}",
++    ]
++    if info.get("ble_mac_address"):
++        lines.append(f"  Bluetooth address: {info['ble_mac_address']}")
++    if info.get("battery_percent"):
++        lines.append(f"  Battery: {info['battery_percent']}%")
++    lines.append(f"  Flash pages: oldest {info.get('oldest_flash_page', 0)}, newest {info.get('newest_flash_page', 0)}")
++    lines.append(f"  Audio encryption key set: {'yes' if info.get('has_audio_encryption_key') else 'no'}")
++    if info.get("status"):
++        lines.extend(format_status_lines(info["status"]))
++    return lines
++
++
+ def load_private_key():
+     """Load private key from keys directory if it exists."""
+     key_file = KEYS_DIR / "private.key"
+diff --git a/tests/conftest.py b/tests/conftest.py
+index cdd3ff3..3b84f90 100644
+--- a/tests/conftest.py
++++ b/tests/conftest.py
+@@ -55,7 +55,8 @@ def sample_button_status_response():
+         pytest.skip("Protobuf not available")
+     
+     msg = pb.PendantAllMsg()
+-    msg.button_status.pressed = True
++    msg.button_status.button_event = pb.BUTTON_DOUBLE_PRESS
++    msg.button_status.num_double_presses_since_boot = 2
+     return msg.SerializeToString()
+ 
+ 
+@@ -76,7 +77,7 @@ def sample_device_status_response():
+     recording.recording_state = 1  # RECORDING
+     
+     wifi = pb.WifiStatus()
+-    wifi.connected = True
++    wifi.state = pb.WIFI_CONNECTED
+     
+     status = pb.DeviceStatus()
+     status.storage_state.CopyFrom(storage)
+diff --git a/tests/test_protocol.py b/tests/test_protocol.py
+index ad39d00..c18a2b7 100644
+--- a/tests/test_protocol.py
++++ b/tests/test_protocol.py
+@@ -73,6 +73,8 @@ class TestPendantProtocol:
+         assert result is not None
+         assert result["type"] == "button_status"
+         assert result["pressed"] is True
++        assert result["event_label"] == "double press"
++        assert result["double_presses"] == 2
+ 
+     def test_parse_device_status_response(self, protocol, sample_device_status_response):
+         """Test parsing a device_status response."""
+@@ -80,9 +82,33 @@ class TestPendantProtocol:
+         assert result is not None
+         assert result["type"] == "device_status"
+         assert result["is_recording"] is True
++        assert result["recording_label"] == "recording"
+         assert result["storage_used_percent"] == 25  # (100-75)/100 * 100
++        assert result["storage_used_pages"] == 25
+         assert result["wifi_connected"] is True
+ 
++    def test_listening_is_reported_as_listening(self, protocol):
++        """A pendant armed for voice activity reports LISTENING, not 'not recording'."""
++        from pendant.core.proto import pb
++        msg = pb.PendantAllMsg()
++        msg.device_status.recording_status.recording_state = 2
++        result = protocol.parse_response(msg.SerializeToString())
++        assert result["is_recording"] is False
++        assert result["recording_label"].startswith("listening")
++
++    def test_parse_device_info_app_layout(self, protocol):
++        """DeviceInfoMsg uses the Android app's field numbers (serial=2, firmware=3)."""
++        from pendant.core.proto import pb
++        msg = pb.PendantAllMsg()
++        msg.device_info.device_id = 42
++        msg.device_info.serial_number = "PND-1"
++        msg.device_info.firmware_version = "1.4.2"
++        msg.device_info.ble_mac_address = bytes.fromhex("c272bcf1883f")
++        result = protocol.parse_response(msg.SerializeToString())
++        assert result["firmware_version"] == "1.4.2"
++        assert result["serial_number"] == "PND-1"
++        assert result["ble_mac_address"] == "C2:72:BC:F1:88:3F"
++
+     def test_extract_audio_from_flash_page(self, protocol, sample_flash_page_data):
+         """Test extracting audio data from a flash page."""
+         opus, pcm, encrypted, codec_type, page_info = protocol.extract_audio_from_flash_page(
