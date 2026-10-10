@@ -12,13 +12,13 @@
 - Status updates that leave out the recording state no longer print "unknown".
 - `pendant info` waits for the pendant's reply (asking again once if needed, up to 10 seconds) instead of giving up after 3.
 - New `pendant sync` command runs the automatic sync below.
-- **Encryption rebuilt to match the Limitless app.** pendant-cli assumed X25519 keys and a NaCl sealed box; the app (read from its JavaScript bundle) uses P-256 ECDH, HKDF-SHA256 with empty salt and info, and AES-128-GCM. `pendant crypto setkey` now does that, checked against WebCrypto. Audio that can't be decrypted is saved whole (`.enc.jsonl`) and its pages are never freed.
+- **Encryption rebuilt to match the Limitless app.** pendant-cli assumed X25519 keys and a NaCl sealed box; the app (read from its JavaScript bundle) uses P-256 ECDH, HKDF-SHA256 with empty salt and info, and AES-128-GCM. `pendant crypto setkey` now does that, checked against WebCrypto. Audio that can't be decrypted is saved whole (`.enc.jsonl`) and its pages are never freed. The encrypted-audio message uses the app's field order (nonce 1, ciphertext 2, tag 3, packet offsets 4); pendant-cli had nonce and ciphertext swapped.
 - The pendant's command replies (`ResponseData`) use the app's layout, so errors are reported.
 - Messages that fail to decode are printed instead of silently dropped.
 - `pendant download` stops once the pendant goes quiet (`--idle-timeout`, default 8 s) and can free pages afterward (`--delete-after`). It frees only after the saved files are confirmed on disk, and only through the last page in an unbroken run it received, so a gap is never deleted.
 - The docs' `protoc` command gains `-I proto`, so the generated file lands in `proto/`.
 
-It applies cleanly to upstream commit `1c71659` and passes pendant-cli's test suite (79 tests, including 11 for the freeing logic and 11 for encryption).
+It applies cleanly to upstream commit `1c71659` and passes pendant-cli's test suite (81 tests, including 11 for the freeing logic and 13 for encryption).
 
 ### Apply on the Pi
 

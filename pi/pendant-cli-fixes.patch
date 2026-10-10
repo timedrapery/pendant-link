@@ -116,7 +116,7 @@ index e21933f..d005482 100644
  
              # Sync dependencies with uv
 diff --git a/proto/pendant.proto b/proto/pendant.proto
-index 22b2dea..0217774 100644
+index 22b2dea..91264f5 100644
 --- a/proto/pendant.proto
 +++ b/proto/pendant.proto
 @@ -73,7 +73,8 @@ message SetLed { int32 state = 1; }
@@ -221,6 +221,22 @@ index 22b2dea..0217774 100644
  }
  
  message BleStatus {
+@@ -304,10 +345,12 @@ message PendantAudioData {
+   EncryptedBytes encrypted_codec_beamforming_data = 13;
+ }
+ 
++// Layout from the Limitless app (FlashPageProto$EncryptedBytes).
+ message EncryptedBytes {
+-  bytes ciphertext = 1;
+-  bytes nonce = 2;
+-  bytes tag = 3;
++  bytes nonce = 1;
++  bytes ciphertext = 2;
++  bytes tag = 3;                       // authentication_tag in the app
++  repeated int32 packet_offsets = 4;   // where each Opus packet starts in the plaintext
+ }
+ 
+ message RuntimeStatus {
 diff --git a/pyproject.toml b/pyproject.toml
 index aae62ae..0924185 100644
 --- a/pyproject.toml
@@ -402,10 +418,10 @@ index cf0b2e6..14df308 100644
      if decode and opus_fname and opus_fname.exists():
          wav_fname = opus_fname.with_suffix('.wav')
 diff --git a/src/pendant/commands/crypto.py b/src/pendant/commands/crypto.py
-index cc35325..05354a7 100644
+index cc35325..e15eac4 100644
 --- a/src/pendant/commands/crypto.py
 +++ b/src/pendant/commands/crypto.py
-@@ -1,60 +1,160 @@
+@@ -1,60 +1,164 @@
 -"""Crypto commands: keygen, setkey."""
 +"""Crypto commands: keygen, setkey, status, decrypt.
 +
@@ -587,7 +603,11 @@ index cc35325..05354a7 100644
 +    lines = [l for l in Path(enc_file).read_text().splitlines() if l.strip()]
 +    for line in lines:
 +        r = json.loads(line)
-+        pt = audiocrypto.decrypt_chunk(key, bytes.fromhex(r["nonce"]), bytes.fromhex(r["ciphertext"]), bytes.fromhex(r["tag"]))
++        nonce, ct, tag = bytes.fromhex(r["nonce"]), bytes.fromhex(r["ciphertext"]), bytes.fromhex(r["tag"])
++        pt = audiocrypto.decrypt_chunk(key, nonce, ct, tag)
++        if pt is None and r.get("layout") != "app":
++            # Saved by an earlier version that read nonce and ciphertext the wrong way round.
++            pt = audiocrypto.decrypt_chunk(key, ct, nonce, tag)
 +        if pt is None:
 +            bad += 1
 +        else:
@@ -947,7 +967,7 @@ index a5867ef..222bebd 100644
  
          if self.on_response:
 diff --git a/src/pendant/core/protocol.py b/src/pendant/core/protocol.py
-index c342f7e..9445d62 100644
+index c342f7e..fad9ca4 100644
 --- a/src/pendant/core/protocol.py
 +++ b/src/pendant/core/protocol.py
 @@ -10,12 +10,43 @@ from .config import KEYS_DIR
@@ -1084,7 +1104,7 @@ index c342f7e..9445d62 100644
  
              return result
  
-@@ -339,15 +367,17 @@ class PendantProtocol:
+@@ -339,15 +367,19 @@ class PendantProtocol:
                          if DEBUG_MODE:
                              print(f"        encrypted: ciphertext={len(enc.ciphertext)}B, nonce={len(enc.nonce)}B, tag={len(enc.tag)}B")
  
@@ -1106,11 +1126,13 @@ index c342f7e..9445d62 100644
 +                                "nonce": bytes(enc.nonce).hex(),
 +                                "ciphertext": bytes(enc.ciphertext).hex(),
 +                                "tag": bytes(enc.tag).hex(),
++                                "packet_offsets": list(enc.packet_offsets),
++                                "layout": "app",  # nonce=1, ciphertext=2
 +                            })
  
                      if DEBUG_MODE and audio.codec_type:
                          print(f"        codec_type: {audio.codec_type}, num_frames: {audio.num_frames}")
-@@ -359,62 +389,70 @@ class PendantProtocol:
+@@ -359,62 +391,70 @@ class PendantProtocol:
  
          return bytes(opus_data), bytes(pcm_data), bytes(encrypted_data), codec_type, page_info
  
@@ -1256,10 +1278,10 @@ index cdd3ff3..3b84f90 100644
      status.storage_state.CopyFrom(storage)
 diff --git a/tests/test_audiocrypto.py b/tests/test_audiocrypto.py
 new file mode 100644
-index 0000000..45a21e6
+index 0000000..f957131
 --- /dev/null
 +++ b/tests/test_audiocrypto.py
-@@ -0,0 +1,153 @@
+@@ -0,0 +1,176 @@
 +"""Audio encryption: the Limitless app's scheme, and never freeing what we can't read."""
 +
 +import json
@@ -1413,6 +1435,29 @@ index 0000000..45a21e6
 +    assert ok["request_id"] == 7 and ok["response_success"] is True
 +    bad = proto.parse_response(_reply("bad key"))
 +    assert bad["response_success"] is False and bad["response_error"] == "bad key"
++
++
++def test_encrypted_bytes_wire_layout_matches_app():
++    """Field 1 nonce, 2 ciphertext, 3 tag, 4 packet offsets (FlashPageProto$EncryptedBytes)."""
++    e = pb.EncryptedBytes(nonce=b"N" * 12, ciphertext=b"C" * 5, tag=b"T" * 16, packet_offsets=[0, 3])
++    raw = e.SerializeToString()
++    assert raw.startswith(b"\x0a\x0c" + b"N" * 12 + b"\x12\x05" + b"C" * 5 + b"\x1a\x10" + b"T" * 16)
++    assert raw.endswith(b"\x22\x02\x00\x03")  # packed repeated int32
++
++
++def test_recovers_file_saved_with_swapped_fields(tmp_path, pendant_and_keys):
++    _, _, key = pendant_and_keys
++    lines = []
++    for pt in (b"one ", b"two"):
++        nonce = os.urandom(12)
++        ct, tag = audiocrypto.encrypt_chunk(key, nonce, pt)
++        # how the old version saved it: names swapped, no "layout"
++        lines.append(json.dumps({"page_index": 1, "nonce": ct.hex(), "ciphertext": nonce.hex(), "tag": tag.hex()}))
++    enc = tmp_path / "pendant_20261010_125315.enc.jsonl"
++    enc.write_text("\n".join(lines) + "\n")
++    result = CliRunner().invoke(decrypt, [str(enc), "--key", str(tmp_path / audiocrypto.AUDIO_KEY_FILE)])
++    assert result.exit_code == 0, result.output
++    assert (tmp_path / "pendant_20261010_125315.opus").read_bytes() == b"one two"
 diff --git a/tests/test_protocol.py b/tests/test_protocol.py
 index ad39d00..822bfc5 100644
 --- a/tests/test_protocol.py
