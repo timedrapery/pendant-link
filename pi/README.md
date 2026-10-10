@@ -69,3 +69,23 @@ mkdir -p ~/enctest && pendant download --decode -o ~/enctest
 ```
 
 It should say "Loaded your audio key", and no "couldn't be decrypted" line. Back up `~/.config/pendant/keys/`, then `systemctl --user start pendant-sync.timer`.
+
+## Nightly backup to Google Drive (encrypted)
+
+`pendant-backup` copies `~/recordings` to a `pendant-backup` folder on Google Drive every night at about 3:17, using rclone. Files are encrypted on the Pi first (rclone crypt), so Drive holds only scrambled names and contents. rclone gets the `drive.file` scope: it can see only what it creates. It copies and never mirrors, so deleting something on the Pi doesn't delete the backup. It skips `.wav` files (rebuild them with `pendant decode`) and anything still in `.incoming`.
+
+On your desktop, once: install rclone (`winget install Rclone.Rclone`), then
+
+```
+rclone authorize "drive" "eyJzY29wZSI6ImRyaXZlLmZpbGUifQ=="
+```
+
+Sign in in the browser it opens; it prints a token. On the Pi:
+
+```
+curl -fsSL https://raw.githubusercontent.com/timedrapery/pendant-link/main/pi/install-backup.sh | bash -s main
+```
+
+Paste the token when asked. Then run `pendant-backup` once by hand, and turn on the timer: `systemctl --user enable --now pendant-backup.timer`. Log: `~/recordings/backup.log`.
+
+The backup's passwords are in `~/.config/pendant/keys/backup-crypt.txt`. Keep a copy off the Pi with your audio key; without them the backup can't be read. To restore: set up rclone with the same token and passwords, then `rclone copy pendant-backup: ~/recordings`.

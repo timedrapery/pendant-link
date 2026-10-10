@@ -1,0 +1,10 @@
+[Unit]
+Description=Back up pendant recordings to Google Drive (encrypted)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/pendant-backup
+TimeoutStartSec=3h
+Nice=10
