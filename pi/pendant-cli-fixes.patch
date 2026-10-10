@@ -116,10 +116,16 @@ index e21933f..d005482 100644
  
              # Sync dependencies with uv
 diff --git a/proto/pendant.proto b/proto/pendant.proto
-index 22b2dea..91264f5 100644
+index 22b2dea..b3051ba 100644
 --- a/proto/pendant.proto
 +++ b/proto/pendant.proto
-@@ -73,7 +73,8 @@ message SetLed { int32 state = 1; }
+@@ -69,11 +69,13 @@ message ServerCommandMsg {
+ // Command message types
+ message SetManufacturingMode {}
+ message SetMacAddress { bytes mac_address = 1; }
+-message SetLed { int32 state = 1; }
++// Layout from the Limitless app (ServerProto$SetLed).
++message SetLed { bool red_enabled = 1; bool green_enabled = 2; bool blue_enabled = 3; }
  message AddWifiCredentials { string ssid = 1; string password = 2; }
  message SetBLEPair { bool enable = 1; }
  message SetCurrentTime { int64 timestamp_ms = 1; }
@@ -129,15 +135,18 @@ index 22b2dea..91264f5 100644
  message DownloadFlashPages {
    bool batch_mode_enabled = 1;
    bool real_time_mode_enabled = 2;
-@@ -97,6 +98,7 @@ message SetVADThreshold { float threshold = 1; }
+@@ -95,8 +97,10 @@ message SetServerInfo { string server_url = 1; }
+ message DisconnectWifi {}
+ message SetVADThreshold { float threshold = 1; }
  message ClearPendantStorage {}
++// 0 (off) to 100, as in the Limitless app; the pendant answers with DeviceStatus.
  message SetLEDBrightness { int32 brightness = 1; }
  message SetDeviceOnShippingMode {}
 +// Raw 65-byte uncompressed P-256 public key (the app's "server" key).
  message SetServerPublicKey { bytes public_key = 1; }
  message PrepareForFirmwareUpdate {}
  message SyncFirmwareUpdateState {}
-@@ -124,12 +126,24 @@ message PendantAllMsg {
+@@ -124,12 +128,24 @@ message PendantAllMsg {
    optional ResponseData response_data = 6;
  }
  
@@ -167,7 +176,7 @@ index 22b2dea..91264f5 100644
  }
  
  message StorageBufferMsg {
-@@ -212,10 +226,29 @@ message BatteryStatus {
+@@ -212,10 +228,29 @@ message BatteryStatus {
    bool under_operating_temperature = 8;
    UsbState usb_state = 9;
  }
@@ -199,7 +208,7 @@ index 22b2dea..91264f5 100644
  
  enum IngestType {
    INGEST_TYPE_UNSPECIFIED = 0;
-@@ -258,10 +291,18 @@ message Chunk {
+@@ -258,10 +293,18 @@ message Chunk {
  }
  
  // Additional status messages for Chunk
@@ -221,7 +230,7 @@ index 22b2dea..91264f5 100644
  }
  
  message BleStatus {
-@@ -304,10 +345,12 @@ message PendantAudioData {
+@@ -304,10 +347,12 @@ message PendantAudioData {
    EncryptedBytes encrypted_codec_beamforming_data = 13;
  }
  
@@ -250,10 +259,10 @@ index aae62ae..0924185 100644
  ]
  
 diff --git a/src/pendant/cli.py b/src/pendant/cli.py
-index fb98890..ea3eee3 100644
+index fb98890..4c861ff 100644
 --- a/src/pendant/cli.py
 +++ b/src/pendant/cli.py
-@@ -19,7 +19,7 @@ def cli(ctx, address, verbose):
+@@ -19,17 +19,21 @@ def cli(ctx, address, verbose):
  
  
  # Import and register command groups
@@ -262,7 +271,11 @@ index fb98890..ea3eee3 100644
  
  # Register individual commands
  cli.add_command(device.status)
-@@ -30,6 +30,9 @@ cli.add_command(audio.decode)
+ cli.add_command(device.info)
+ cli.add_command(device.listen)
++cli.add_command(device.led)
+ cli.add_command(audio.download)
+ cli.add_command(audio.decode)
  cli.add_command(audio.record)
  cli.add_command(audio.stop)
  cli.add_command(audio.clear)
@@ -273,7 +286,7 @@ index fb98890..ea3eee3 100644
  # Register command groups
  cli.add_command(bluetooth.bt)
 diff --git a/src/pendant/commands/audio.py b/src/pendant/commands/audio.py
-index cf0b2e6..14df308 100644
+index cf0b2e6..4bb0a47 100644
 --- a/src/pendant/commands/audio.py
 +++ b/src/pendant/commands/audio.py
 @@ -1,6 +1,7 @@
@@ -351,7 +364,7 @@ index cf0b2e6..14df308 100644
  
      # Save audio
      click.echo(f"\n\nDownload complete!")
-@@ -72,23 +102,32 @@ def download(ctx, decode, output):
+@@ -72,26 +102,36 @@ def download(ctx, decode, output):
          timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
  
      opus_fname = None
@@ -388,8 +401,24 @@ index cf0b2e6..14df308 100644
 +            click.echo("  No audio key is set up here. See 'pendant crypto --help'.")
  
      # Save timestamp metadata as JSON sidecar
-     if client.page_timestamps and client.opus_data:
-@@ -109,6 +148,29 @@ def download(ctx, decode, output):
+-    if client.page_timestamps and client.opus_data:
++    has_buttons = any(p.get("buttons") for p in (client.page_timestamps or []))
++    if client.page_timestamps and (client.opus_data or has_buttons):
+         # Check if timestamps are real (synced) or just device uptime
+         first_ts = client.page_timestamps[0].get("absolute_timestamp_ms", 0) if client.page_timestamps else 0
+         timestamps_synced = first_ts > MIN_VALID_TIMESTAMP_MS
+@@ -103,12 +143,39 @@ def download(ctx, decode, output):
+             "timestamps_synced": timestamps_synced,
+             "total_pages": client.page_count,
+             "total_audio_bytes": len(client.opus_data),
+-            "pages": client.page_timestamps
++            "pages": client.page_timestamps,
++            # A quick press is a star ("keep this moment"), as in the Limitless app.
++            "button_events": [b for p in client.page_timestamps for b in p.get("buttons", [])],
++            "stars_ms": [b["at_ms"] for p in client.page_timestamps for b in p.get("buttons", [])
++                         if b["event"] == "short press" and b["at_ms"]],
+         }
+         json_fname = output_dir / f"pendant_{timestamp}.json"
          json_fname.write_text(json.dumps(metadata, indent=2))
          click.echo(f"Saved metadata: {json_fname}")
  
@@ -621,7 +650,7 @@ index cc35325..e15eac4 100644
 +    click.echo(f"Decrypted {len(lines) - bad} of {len(lines)} chunks into {target}")
 +    click.echo(f"  Decode: pendant decode {target}")
 diff --git a/src/pendant/commands/device.py b/src/pendant/commands/device.py
-index e05b050..35c65ab 100644
+index e05b050..a56d9ce 100644
 --- a/src/pendant/commands/device.py
 +++ b/src/pendant/commands/device.py
 @@ -46,10 +46,27 @@ def info(ctx):
@@ -685,6 +714,59 @@ index e05b050..35c65ab 100644
          elif rtype and rtype != "parse_error":
              click.echo(f"[{timestamp}] Event: {rtype}")
  
+@@ -101,3 +124,52 @@ def listen(ctx, timeout):
+         click.echo("\nStopped listening.")
+     finally:
+         client.disconnect()
++
++
++@click.command()
++@click.argument("brightness", type=click.IntRange(0, 100), required=False)
++@click.pass_context
++def led(ctx, brightness):
++    """Show or set the pendant's light: 0 is off, 100 is full (e.g. pendant led 0)."""
++    from gi.repository import GLib
++
++    client = DBusClient(ctx.obj['address'])
++    seen = {"status": None}
++
++    def on_response(r):
++        if r.get("type") == "device_status":
++            seen["status"] = r
++        elif r.get("type") == "device_info" and r.get("status"):
++            seen["status"] = r["status"]
++
++    client.on_response = on_response
++    if not client.connect():
++        raise click.ClickException("Failed to connect to device")
++    try:
++        if brightness is None:
++            client.send_command("get_device_info")
++        else:
++            client.send_command("set_led_brightness", brightness=brightness)
++
++        def wait():
++            if seen["status"] is not None:
++                client.stop()
++                return False
++            return True
++
++        GLib.timeout_add(250, wait)
++        client.run_with_timeout(6)
++    finally:
++        client.disconnect()
++
++    st = seen["status"]
++    if st is None:
++        if brightness is not None:
++            click.echo(f"Sent brightness {brightness}; the pendant didn't confirm. Look at the light.")
++            return
++        raise click.ClickException("No reply from the pendant. Tap it to wake it and try again.")
++    level = st.get("led_brightness", 0)
++    if brightness is not None and level != brightness:
++        click.echo(f"Asked for {brightness}, but the pendant reports {level}.")
++    else:
++        click.echo("LED: off" if level == 0 else f"LED brightness: {level}")
 diff --git a/src/pendant/commands/sync.py b/src/pendant/commands/sync.py
 new file mode 100644
 index 0000000..9fe237a
@@ -998,10 +1080,10 @@ index a5867ef..222bebd 100644
  
          if self.on_response:
 diff --git a/src/pendant/core/protocol.py b/src/pendant/core/protocol.py
-index c342f7e..fad9ca4 100644
+index c342f7e..9539622 100644
 --- a/src/pendant/core/protocol.py
 +++ b/src/pendant/core/protocol.py
-@@ -10,12 +10,43 @@ from .config import KEYS_DIR
+@@ -10,12 +10,44 @@ from .config import KEYS_DIR
  DEBUG_MODE = False
  
  
@@ -1014,7 +1096,8 @@ index c342f7e..fad9ca4 100644
 +    """Flatten a DeviceStatus message (field layout from the Limitless Android app)."""
 +    out = {"is_recording": False, "recording_state": None, "recording_label": "unknown",
 +           "storage_used_percent": 0.0, "storage_used_pages": None, "storage_total_pages": None,
-+           "wifi_connected": False, "wifi_label": "unknown"}
++           "wifi_connected": False, "wifi_label": "unknown",
++           "led_brightness": status.led_brightness}
 +    if status.HasField("recording_status"):
 +        state = status.recording_status.recording_state
 +        out["recording_state"] = state
@@ -1045,7 +1128,7 @@ index c342f7e..fad9ca4 100644
  
      def create_ble_message(self, payload: bytes) -> bytes:
          """Wrap a payload in BLE message envelope."""
-@@ -82,6 +113,11 @@ class PendantProtocol:
+@@ -82,6 +114,11 @@ class PendantProtocol:
              dl.real_time_mode_enabled = kwargs.get("realtime", False)
              cmd.download_flash_pages.CopyFrom(dl)
  
@@ -1057,7 +1140,24 @@ index c342f7e..fad9ca4 100644
          elif cmd_type == "set_current_time":
              sct = pb.SetCurrentTime()
              sct.timestamp_ms = kwargs.get("timestamp_ms", int(datetime.now().timestamp() * 1000))
-@@ -166,39 +202,22 @@ class PendantProtocol:
+@@ -111,12 +148,14 @@ class PendantProtocol:
+ 
+         elif cmd_type == "set_led":
+             led_msg = pb.SetLed()
+-            led_msg.state = kwargs.get("state", 0)
++            led_msg.red_enabled = bool(kwargs.get("red", False))
++            led_msg.green_enabled = bool(kwargs.get("green", False))
++            led_msg.blue_enabled = bool(kwargs.get("blue", False))
+             cmd.set_led.CopyFrom(led_msg)
+ 
+         elif cmd_type == "set_led_brightness":
+             brightness_msg = pb.SetLEDBrightness()
+-            brightness_msg.brightness = kwargs.get("brightness", 100)
++            brightness_msg.brightness = max(0, min(100, int(kwargs.get("brightness", 100))))
+             cmd.set_led_brightness.CopyFrom(brightness_msg)
+ 
+         elif cmd_type == "set_vad_threshold":
+@@ -166,39 +205,22 @@ class PendantProtocol:
              if content_type == "device_info":
                  info = msg.device_info
                  result.update({
@@ -1109,7 +1209,7 @@ index c342f7e..fad9ca4 100644
  
              elif content_type == "storage_buffer":
                  buf = msg.storage_buffer
-@@ -232,14 +251,23 @@ class PendantProtocol:
+@@ -232,14 +254,23 @@ class PendantProtocol:
                  })
  
              elif content_type == "button_status":
@@ -1135,7 +1235,25 @@ index c342f7e..fad9ca4 100644
  
              return result
  
-@@ -339,15 +367,19 @@ class PendantProtocol:
+@@ -279,6 +310,17 @@ class PendantProtocol:
+                 print(f"\n    FlashPage: ts={page.absolute_timestamp_ms}, uptime={page.boot_uptime_ms}, chunks={len(page.chunks)}")
+ 
+             for i, chunk in enumerate(page.chunks):
++                # Button presses are stored in the recording with their own clock time,
++                # so a press made while the Pi was away still arrives with the next sync.
++                if chunk.HasField('button_status') and chunk.button_status.button_event:
++                    btn = chunk.button_status
++                    at_ms = btn.button_event_absolute_timestamp_ms or (
++                        page.absolute_timestamp_ms + chunk.time_offset_ms if page.absolute_timestamp_ms else 0)
++                    page_info.setdefault("buttons", []).append({
++                        "event": BUTTON_EVENT_LABELS.get(btn.button_event, f"event {btn.button_event}"),
++                        "at_ms": at_ms,
++                    })
++
+                 # Chunk is not a oneof - check if audio_data field is populated
+                 has_audio = chunk.HasField('audio_data') if hasattr(chunk, 'HasField') else bool(chunk.audio_data.ByteSize())
+ 
+@@ -339,15 +381,19 @@ class PendantProtocol:
                          if DEBUG_MODE:
                              print(f"        encrypted: ciphertext={len(enc.ciphertext)}B, nonce={len(enc.nonce)}B, tag={len(enc.tag)}B")
  
@@ -1163,7 +1281,7 @@ index c342f7e..fad9ca4 100644
  
                      if DEBUG_MODE and audio.codec_type:
                          print(f"        codec_type: {audio.codec_type}, num_frames: {audio.num_frames}")
-@@ -359,62 +391,70 @@ class PendantProtocol:
+@@ -359,62 +405,70 @@ class PendantProtocol:
  
          return bytes(opus_data), bytes(pcm_data), bytes(encrypted_data), codec_type, page_info
  
@@ -1309,10 +1427,10 @@ index cdd3ff3..3b84f90 100644
      status.storage_state.CopyFrom(storage)
 diff --git a/tests/test_audiocrypto.py b/tests/test_audiocrypto.py
 new file mode 100644
-index 0000000..f957131
+index 0000000..54d1cb4
 --- /dev/null
 +++ b/tests/test_audiocrypto.py
-@@ -0,0 +1,176 @@
+@@ -0,0 +1,203 @@
 +"""Audio encryption: the Limitless app's scheme, and never freeing what we can't read."""
 +
 +import json
@@ -1489,8 +1607,35 @@ index 0000000..f957131
 +    result = CliRunner().invoke(decrypt, [str(enc), "--key", str(tmp_path / audiocrypto.AUDIO_KEY_FILE)])
 +    assert result.exit_code == 0, result.output
 +    assert (tmp_path / "pendant_20261010_125315.opus").read_bytes() == b"one two"
++
++
++def test_button_presses_come_through_with_their_time():
++    page = pb.FlashPage(absolute_timestamp_ms=1760125000000)
++    c = page.chunks.add(time_offset_ms=1500)
++    c.button_status.button_event = 1  # short press
++    c.button_status.button_event_absolute_timestamp_ms = 1760125001234
++    c2 = page.chunks.add(time_offset_ms=2000)
++    c2.button_status.button_event = 2  # long press, no own timestamp
++    c3 = page.chunks.add(time_offset_ms=2500)
++    c3.button_status.button_event = 0  # release: ignored
++    _, _, _, _, info = PendantProtocol().extract_audio_from_flash_page(page.SerializeToString())
++    assert info["buttons"] == [
++        {"event": "short press", "at_ms": 1760125001234},
++        {"event": "long press", "at_ms": 1760125002000},
++    ]
++
++
++def test_stars_saved_in_metadata(tmp_path):
++    c = FakeClient([5, 6], opus=b"\x01" * 10)
++    c.page_timestamps[1]["buttons"] = [{"event": "short press", "at_ms": 1760125001234},
++                                      {"event": "long press", "at_ms": 1760125009999}]
++    c.protocol = PendantProtocol()
++    _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=False)
++    meta = json.loads(next(tmp_path.glob("*.json")).read_text())
++    assert meta["stars_ms"] == [1760125001234]
++    assert len(meta["button_events"]) == 2
 diff --git a/tests/test_protocol.py b/tests/test_protocol.py
-index ad39d00..822bfc5 100644
+index ad39d00..1de6f7a 100644
 --- a/tests/test_protocol.py
 +++ b/tests/test_protocol.py
 @@ -73,6 +73,8 @@ class TestPendantProtocol:
@@ -1537,7 +1682,7 @@ index ad39d00..822bfc5 100644
      def test_extract_audio_from_flash_page(self, protocol, sample_flash_page_data):
          """Test extracting audio data from a flash page."""
          opus, pcm, encrypted, codec_type, page_info = protocol.extract_audio_from_flash_page(
-@@ -176,3 +203,29 @@ class TestExistingCommands:
+@@ -176,3 +203,49 @@ class TestExistingCommands:
          cmd = protocol.create_command("set_server_public_key", public_key=fake_key)
          assert isinstance(cmd, bytes)
          assert len(cmd) > 0
@@ -1567,6 +1712,26 @@ index ad39d00..822bfc5 100644
 +    assert not any("Serial" in l for l in lines)
 +    lines = format_device_info_lines({"firmware_version": "1.1.20", "serial_number": "PND-1", "device_id": 7})
 +    assert any("Serial: PND-1" in l for l in lines)
++
++
++def test_led_brightness_command_and_status():
++    from pendant.core.protocol import PendantProtocol, pb
++    proto = PendantProtocol()
++    env = pb.BLEMessageFromNativeToPendant()
++    env.ParseFromString(proto.create_command("set_led_brightness", brightness=0))
++    cmd = pb.ServerCommandMsg(); cmd.ParseFromString(env.payload)
++    assert cmd.WhichOneof("content") == "set_led_brightness" and cmd.set_led_brightness.brightness == 0
++    env.ParseFromString(proto.create_command("set_led_brightness", brightness=250))
++    cmd.ParseFromString(env.payload)
++    assert cmd.set_led_brightness.brightness == 100  # clamped
++    msg = pb.PendantAllMsg(); msg.device_status.led_brightness = 30
++    assert proto.parse_response(msg.SerializeToString())["led_brightness"] == 30
++
++
++def test_set_led_layout_matches_app():
++    from pendant.core.protocol import pb
++    raw = pb.SetLed(red_enabled=True, blue_enabled=True).SerializeToString()
++    assert raw == b"\x08\x01\x18\x01"  # red=1, blue=3
 diff --git a/tests/test_sync_command.py b/tests/test_sync_command.py
 new file mode 100644
 index 0000000..01e90d2

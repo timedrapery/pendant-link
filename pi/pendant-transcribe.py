@@ -6,6 +6,9 @@ For each ~/recordings/YYYY-MM-DD/pendant_*.wav without a transcript, writes next
     pendant_....words.json  the same with start/end times, for tools to use later
 A recording with no speech gets a .txt saying so, so it isn't tried again.
 
+Stars: a quick press of the pendant button marks a moment ("keep this"), as in the Limitless
+app. Lines from STAR_BEFORE seconds before a press to STAR_AFTER seconds after it start with ★.
+
 Run it as `pendant transcribe` (the nightly timer does), or:
     pendant transcribe --list         show what's waiting
     pendant transcribe --limit 3      do at most 3 recordings
@@ -30,6 +33,8 @@ MODEL = os.environ.get("PENDANT_WHISPER_MODEL", "base.en")
 THREADS = int(os.environ.get("PENDANT_WHISPER_THREADS", "4"))
 BEAM = int(os.environ.get("PENDANT_WHISPER_BEAM", "1"))
 NO_SPEECH = "(no speech found)"
+STAR = "★"
+STAR_BEFORE, STAR_AFTER = 90, 15  # seconds around a button press
 
 
 def log(msg):
@@ -73,6 +78,28 @@ def read_wav(wav: Path):
     return np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
 
 
+def stars_for(wav: Path):
+    """Star times (datetimes) from every sync's metadata for that day.
+
+    A press can arrive in a sync with no audio of its own, so look across the day's folder.
+    """
+    stars = []
+    for meta in sorted(wav.parent.glob("pendant_*.json")):
+        if meta.name.endswith(".words.json"):
+            continue
+        try:
+            for ms in json.loads(meta.read_text()).get("stars_ms", []):
+                stars.append(datetime.fromtimestamp(ms / 1000))
+        except (OSError, ValueError):
+            continue
+    return sorted(set(stars))
+
+
+def _starred(at, stars):
+    return at is not None and any(
+        s - timedelta(seconds=STAR_BEFORE) <= at <= s + timedelta(seconds=STAR_AFTER) for s in stars)
+
+
 def _write_atomic(path: Path, text: str):
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(text)
@@ -82,6 +109,7 @@ def _write_atomic(path: Path, text: str):
 def transcribe_one(model, wav: Path):
     """Transcribe one WAV. Returns (seconds of audio, number of speech lines)."""
     start = recording_start(wav)
+    stars = stars_for(wav)
     segments, info = model.transcribe(
         read_wav(wav), language="en", beam_size=BEAM, vad_filter=True,
         condition_on_previous_text=False,
@@ -93,16 +121,19 @@ def transcribe_one(model, wav: Path):
             continue
         at = (start + timedelta(seconds=seg.start)) if start else None
         stamp = at.strftime("%H:%M:%S") if at else _clock(seg.start)
-        lines.append(f"[{stamp}] {text}")
+        starred = _starred(at, stars)
+        lines.append(f"{STAR + ' ' if starred else ''}[{stamp}] {text}")
         words.append({
             "start": round(seg.start, 2), "end": round(seg.end, 2),
             "at": at.isoformat(timespec="seconds") if at else None, "text": text,
+            "starred": starred,
         })
     # Write the JSON first: the .txt is what marks a recording as done.
     _write_atomic(wav.with_suffix(".words.json"), json.dumps({
         "recording": wav.name, "model": MODEL,
         "recording_start": start.isoformat(timespec="seconds") if start else None,
-        "duration": round(getattr(info, "duration", 0.0), 1), "segments": words,
+        "duration": round(getattr(info, "duration", 0.0), 1),
+        "stars": [t.isoformat(timespec="seconds") for t in stars], "segments": words,
     }, indent=1))
     _write_atomic(wav.with_suffix(".txt"), ("\n".join(lines) if lines else NO_SPEECH) + "\n")
     return getattr(info, "duration", 0.0), len(lines)

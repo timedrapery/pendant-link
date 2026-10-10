@@ -69,7 +69,8 @@ def test_writes_clock_time_lines(tr, tmp_path):
     assert tr.main([], model_factory=lambda: m) == 0
     assert wav.with_suffix(".txt").read_text() == "[12:45:31] Good morning.\n[12:46:30] Coffee?\n"
     words = json.loads(wav.with_suffix(".words.json").read_text())
-    assert words["segments"][0] == {"start": 31.2, "end": 34.0, "at": "2026-10-10T12:45:31", "text": "Good morning."}
+    assert words["segments"][0] == {"start": 31.2, "end": 34.0, "at": "2026-10-10T12:45:31",
+                                    "text": "Good morning.", "starred": False}
     assert m.calls[0][1]["vad_filter"] is True and m.calls[0][1]["language"] == "en"
 
 
@@ -160,3 +161,37 @@ def test_wrong_wav_format_fails_that_one_only(tr, tmp_path):
     good = _rec(tmp_path, "20261010_100000")
     rc = tr.main([], model_factory=lambda: FakeModel({good.name: [(1, 2, "ok")]}))
     assert rc == 1 and not bad.with_suffix(".txt").exists() and good.with_suffix(".txt").exists()
+
+
+def test_stars_mark_lines_around_a_press(tr, tmp_path):
+    from datetime import datetime
+    start = datetime(2026, 10, 10, 14, 0, 0)
+    wav = _rec(tmp_path, "20261010_140000", int(start.timestamp() * 1000))
+    press = datetime(2026, 10, 10, 14, 5, 0)
+    meta = json.loads(wav.with_suffix(".json").read_text())
+    meta["stars_ms"] = [int(press.timestamp() * 1000)]
+    wav.with_suffix(".json").write_text(json.dumps(meta))
+    m = FakeModel({wav.name: [(200, 202, "Before the window."),   # 14:03:20, 100 s before
+                              (250, 252, "Worth keeping."),        # 14:04:10, inside
+                              (305, 306, "Right after."),          # 14:05:05, inside
+                              (330, 331, "Later on.")]})           # 14:05:30, after
+    tr.main([], model_factory=lambda: m)
+    assert wav.with_suffix(".txt").read_text().splitlines() == [
+        "[14:03:20] Before the window.",
+        "★ [14:04:10] Worth keeping.",
+        "★ [14:05:05] Right after.",
+        "[14:05:30] Later on.",
+    ]
+    words = json.loads(wav.with_suffix(".words.json").read_text())
+    assert words["stars"] == ["2026-10-10T14:05:00"]
+
+
+def test_star_from_a_sync_without_audio_still_counts(tr, tmp_path):
+    from datetime import datetime
+    start = datetime(2026, 10, 10, 15, 0, 0)
+    wav = _rec(tmp_path, "20261010_150000", int(start.timestamp() * 1000))
+    other = wav.parent / "pendant_20261010_151500.json"  # a later sync that only carried a press
+    other.write_text(json.dumps({"stars_ms": [int(datetime(2026, 10, 10, 15, 1, 0).timestamp() * 1000)]}))
+    m = FakeModel({wav.name: [(30, 32, "Remember this.")]})
+    tr.main([], model_factory=lambda: m)
+    assert wav.with_suffix(".txt").read_text() == "★ [15:00:30] Remember this.\n"

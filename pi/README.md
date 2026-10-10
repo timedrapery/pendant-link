@@ -15,10 +15,12 @@
 - **Encryption rebuilt to match the Limitless app.** pendant-cli assumed X25519 keys and a NaCl sealed box; the app (read from its JavaScript bundle) uses P-256 ECDH, HKDF-SHA256 with empty salt and info, and AES-128-GCM. `pendant crypto setkey` now does that, checked against WebCrypto. Audio that can't be decrypted is saved whole (`.enc.jsonl`) and its pages are never freed. The encrypted-audio message uses the app's field order (nonce 1, ciphertext 2, tag 3, packet offsets 4); pendant-cli had nonce and ciphertext swapped.
 - The pendant's command replies (`ResponseData`) use the app's layout, so errors are reported.
 - Messages that fail to decode are printed instead of silently dropped.
+- **`pendant led`** shows or sets the light: `pendant led 0` is off, `100` full (the app's 0–100 brightness). `SetLed` uses the app's layout (red, green, blue on/off).
+- **Stars:** button presses stored in the recording are kept, with their own clock time, in each download's `.json` (`button_events`, and `stars_ms` for quick presses).
 - `pendant download` stops once the pendant goes quiet (`--idle-timeout`, default 8 s) and can free pages afterward (`--delete-after`). It frees only after the saved files are confirmed on disk, and only through the last page in an unbroken run it received, so a gap is never deleted.
 - The docs' `protoc` command gains `-I proto`, so the generated file lands in `proto/`.
 
-It applies cleanly to upstream commit `1c71659` and passes pendant-cli's test suite (84 tests, including 11 for the freeing logic and 13 for encryption).
+It applies cleanly to upstream commit `1c71659` and passes pendant-cli's test suite (88 tests, including 11 for the freeing logic and 13 for encryption).
 
 ### Apply on the Pi
 
@@ -104,5 +106,7 @@ systemctl --user enable --now pendant-transcribe.timer
 ```
 
 **Readable transcripts for Claude.** With `PENDANT_TRANSCRIPTS_TO_DRIVE=yes` in `~/.config/pendant/env`, the nightly backup also copies the `.txt` transcripts, unencrypted, to a `pendant-transcripts` folder on Drive (text only, never audio), so Claude can read them through the Google Drive connection. Google can read them too. Remove the line to stop; delete the folder on Drive to remove what's there.
+
+**Stars.** A quick press of the pendant button marks a moment, as in the Limitless app. The press is stored with the recording, so it works even when the Pi isn't in range. Transcript lines from about 90 seconds before a press to 15 seconds after start with ★.
 
 Also: `pendant transcribe --list` (what's waiting), `--redo FILE` (transcribe one again). Settings: `PENDANT_WHISPER_MODEL` (`tiny.en` is faster, `small.en` more accurate), `PENDANT_WHISPER_BEAM` (1; higher is slower and a little more accurate). Log: `~/recordings/transcribe.log`. Tests (stand-in model): `pytest pi/tests`.
