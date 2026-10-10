@@ -239,3 +239,58 @@ def test_redo_day(tr, tmp_path):
     tr.main(["--redo-day", "2026-10-10"], model_factory=lambda: m)
     assert [c[0] for c in m.calls] == [a.name, b.name]
     assert a.with_suffix(".txt").read_text() == "(no speech found)\n"
+
+
+def _day_files(archive, day, name, wav=True, opus=True, txt=True):
+    d = archive / day
+    d.mkdir(parents=True, exist_ok=True)
+    base = d / name
+    if wav: _write_wav(base.with_suffix(".wav"), seconds=1.0)
+    if opus: base.with_suffix(".opus").write_bytes(b"OPUS")
+    if txt: base.with_suffix(".txt").write_text("[09:00:00] hi\n")
+    return base
+
+
+def test_tidy_deletes_only_old_safe_wavs(tr, tmp_path):
+    from datetime import date
+    today = date(2026, 10, 30)
+    old = _day_files(tmp_path, "2026-10-10", "pendant_20261010_090000")
+    no_opus = _day_files(tmp_path, "2026-10-10", "pendant_20261010_100000", opus=False)
+    no_txt = _day_files(tmp_path, "2026-10-10", "pendant_20261010_110000", txt=False)
+    recent = _day_files(tmp_path, "2026-10-20", "pendant_20261020_090000")
+    deleted, freed = tr.tidy(tmp_path, "14", today=today)
+    assert deleted == 1 and freed > 0
+    assert not old.with_suffix(".wav").exists()
+    assert old.with_suffix(".opus").exists() and old.with_suffix(".txt").exists()
+    assert no_opus.with_suffix(".wav").exists()   # nothing to rebuild it from
+    assert no_txt.with_suffix(".wav").exists()    # not transcribed yet
+    assert recent.with_suffix(".wav").exists()    # within 14 days
+
+
+def test_tidy_never_and_bad_values_keep_everything(tr, tmp_path):
+    from datetime import date
+    old = _day_files(tmp_path, "2026-01-01", "pendant_20260101_090000")
+    assert tr.tidy(tmp_path, "never", today=date(2026, 10, 30)) == (0, 0)
+    assert tr.tidy(tmp_path, "two weeks", today=date(2026, 10, 30)) == (0, 0)
+    assert old.with_suffix(".wav").exists()
+
+
+def test_nightly_run_tidies_but_redo_does_not(tr, tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(tr, "run_tidy", lambda archive: calls.append("tidy"))
+    tr.main([], model_factory=lambda: FakeModel())            # nothing to do: still tidies
+    assert calls == ["tidy"]
+    wav = _rec(tmp_path, "20261010_090000")
+    calls.clear()
+    tr.main(["--redo", str(wav)], model_factory=lambda: FakeModel())
+    assert calls == []
+
+
+def test_setting_reads_env_file(tr, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("PENDANT_KEEP_WAV_DAYS", raising=False)
+    (tmp_path / ".config" / "pendant").mkdir(parents=True)
+    (tmp_path / ".config" / "pendant" / "env").write_text("PENDANT_ADDRESS=x\nPENDANT_KEEP_WAV_DAYS=30\n")
+    assert tr.setting("PENDANT_KEEP_WAV_DAYS", "14") == "30"
+    monkeypatch.setenv("PENDANT_KEEP_WAV_DAYS", "7")
+    assert tr.setting("PENDANT_KEEP_WAV_DAYS", "14") == "7"

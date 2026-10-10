@@ -250,6 +250,8 @@ systemctl --user enable --now pendant-transcribe.timer
 
 On a Pi 4 it runs about 1.4× faster than real time for steady talking, and far faster through quiet stretches, so a full day finishes overnight. The pendant records only when it hears speech, so a quiet day gives a short transcript. That's expected.
 
+**Tidying up.** WAVs are about 15 times bigger than the compact `.opus` audio. After each nightly run, WAVs from more than 14 days ago are deleted, but only when that recording's `.opus` and transcript are both there. To listen to an old one again, rebuild it: `pendant decode ~/recordings/<day>/<file>.opus`. Each run also logs how much space is free and warns when the card is getting full. Keep WAVs longer (or shorter) with `PENDANT_KEEP_WAV_DAYS=30` in `~/.config/pendant/env`, or set it to `never`. `pendant transcribe --tidy` tidies right away.
+
 Settings, in `~/.config/pendant/env` or before the command: `PENDANT_WHISPER_MODEL` (`base.en` by default; `tiny.en` is faster, `small.en` more accurate but may not keep up on a Pi 4), `PENDANT_WHISPER_BEAM` (1; higher is slower and slightly more accurate).
 
 ## 9. Nightly backup to Google Drive (optional)
@@ -330,6 +332,8 @@ With readable transcripts on Drive (step 9), an AI assistant that can read your 
 | `pendant transcribe` | Transcribe anything new now |
 | `pendant transcribe --list` | Show recordings waiting for a transcript |
 | `pendant transcribe --redo-day 2026-10-10` | Transcribe a whole day again |
+| `pendant transcribe --tidy` | Delete old WAVs now and show free space |
+| `pendant decode <file>.opus` | Rebuild a WAV to listen to |
 | `pendant backup` | Back up now |
 | `pendant led 0` | Light off (`100` is full) |
 | `pendant crypto status` | Which keys are set up |
@@ -340,7 +344,7 @@ With readable transcripts on Drive (step 9), an AI assistant that can read your 
 
 | Path | What's there |
 | --- | --- |
-| `~/recordings/YYYY-MM-DD/` | Each recording: `.opus` (compact audio), `.wav` (to listen to), `.json` (times, stars, button presses), `.txt` (transcript), `.words.json` (transcript with exact times) |
+| `~/recordings/YYYY-MM-DD/` | Each recording: `.opus` (compact audio), `.wav` (to listen to; deleted after 14 days, rebuildable), `.json` (times, stars, button presses), `.txt` (transcript), `.words.json` (transcript with exact times) |
 | `~/recordings/*.log` | Logs for sync, transcription and backup |
 | `~/.config/pendant/env` | Settings: your pendant's address, options |
 | `~/.config/pendant/keys/` | Your encryption keys and backup passwords. Keep a copy elsewhere. |
@@ -365,6 +369,7 @@ With readable transcripts on Drive (step 9), an AI assistant that can read your 
 | Transcripts have very few lines | The pendant records only while it hears speech, so quiet time leaves little to transcribe. Talk near it and run `pendant sync` then `pendant transcribe` to check. |
 | Transcript times look off for recordings from before you updated | Redo the day: `pendant transcribe --redo-day <YYYY-MM-DD>`. |
 | The light came back on | Run `pendant led 0` again. |
+| "Getting full" in `transcribe.log` | Lower `PENDANT_KEEP_WAV_DAYS` in `~/.config/pendant/env`, or move old day folders off the Pi (they're in the backup if you set it up). |
 
 ## Uninstall
 

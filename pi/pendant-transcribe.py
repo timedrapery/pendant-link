@@ -15,8 +15,16 @@ Run it as `pendant transcribe` (the nightly timer does), or:
     pendant transcribe --redo FILE    transcribe one recording again
     pendant transcribe --redo-day 2026-10-10   transcribe a whole day again
     pendant transcribe --check FILE   loudness and how much speech is detected (numbers only)
-Settings (environment): PENDANT_WHISPER_MODEL (default base.en), PENDANT_WHISPER_THREADS (4),
-PENDANT_WHISPER_BEAM (1), PENDANT_ARCHIVE (~/recordings).
+    pendant transcribe --tidy         only tidy up old WAVs (see below)
+
+Tidying: WAVs are about 15 times bigger than the .opus audio. After each nightly run, WAVs
+from days more than PENDANT_KEEP_WAV_DAYS ago (default 14) are deleted, but only when the
+.opus and the transcript are both there. Rebuild one any time with `pendant decode FILE.opus`.
+Set PENDANT_KEEP_WAV_DAYS=never to keep them all.
+
+Settings (environment, or ~/.config/pendant/env): PENDANT_WHISPER_MODEL (default base.en),
+PENDANT_WHISPER_THREADS (4), PENDANT_WHISPER_BEAM (1), PENDANT_KEEP_WAV_DAYS (14),
+PENDANT_ARCHIVE (~/recordings).
 """
 
 import argparse
@@ -24,6 +32,7 @@ import fcntl
 import json
 import os
 import re
+import shutil
 import sys
 import time
 from datetime import datetime, timedelta
@@ -36,6 +45,22 @@ BEAM = int(os.environ.get("PENDANT_WHISPER_BEAM", "1"))
 NO_SPEECH = "(no speech found)"
 STAR = "★"
 STAR_BEFORE, STAR_AFTER = 90, 15  # seconds around a button press
+
+
+def setting(name, default):
+    """From the environment, else ~/.config/pendant/env, else the default."""
+    if os.environ.get(name):
+        return os.environ[name]
+    env = Path.home() / ".config" / "pendant" / "env"
+    try:
+        for line in env.read_text().splitlines():
+            if line.startswith(name + "="):
+                value = line.split("=", 1)[1].strip()
+                if value:
+                    default = value
+    except OSError:
+        pass
+    return default
 
 
 def log(msg):
@@ -211,6 +236,61 @@ def check(wav: Path):
     return 0
 
 
+def tidy(archive: Path, keep_days, today=None):
+    """Delete WAVs from days older than keep_days when their .opus and transcript exist.
+
+    Returns (files deleted, bytes freed). keep_days "never" keeps everything.
+    """
+    if str(keep_days).strip().lower() in ("never", "", "none"):
+        return 0, 0
+    try:
+        keep = int(keep_days)
+    except ValueError:
+        log(f"PENDANT_KEEP_WAV_DAYS should be a number of days or 'never', not {keep_days!r}; keeping WAVs.")
+        return 0, 0
+    today = today or datetime.now().date()
+    cutoff = today - timedelta(days=keep)
+    deleted = freed = 0
+    for day in sorted(archive.glob("[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]")):
+        try:
+            day_date = datetime.strptime(day.name, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if day_date >= cutoff:
+            continue
+        for wav in sorted(day.glob("pendant_*.wav")):
+            opus, txt = wav.with_suffix(".opus"), wav.with_suffix(".txt")
+            if not (opus.is_file() and opus.stat().st_size > 0 and txt.is_file()):
+                continue  # not safe to delete: nothing to rebuild it from, or not transcribed yet
+            size = wav.stat().st_size
+            wav.unlink()
+            deleted += 1
+            freed += size
+    return deleted, freed
+
+
+def report_space(archive: Path):
+    """Log free space, with a warning when the card is getting full."""
+    try:
+        usage = shutil.disk_usage(archive)
+    except OSError:
+        return
+    free_gb = usage.free / 1e9
+    pct = 100 * usage.free / usage.total if usage.total else 100
+    msg = f"Free space: {free_gb:.1f} GB ({pct:.0f}%)."
+    if pct < 10 or free_gb < 2:
+        msg += " Getting full: lower PENDANT_KEEP_WAV_DAYS, or move old recordings off the Pi."
+    log(msg)
+
+
+def run_tidy(archive: Path):
+    keep = setting("PENDANT_KEEP_WAV_DAYS", "14")
+    deleted, freed = tidy(archive, keep)
+    if deleted:
+        log(f"Tidied {deleted} old WAV file(s), freed {freed / 1e6:.0f} MB (the .opus audio and transcripts are kept).")
+    report_space(archive)
+
+
 def load_model():
     from faster_whisper import WhisperModel
     return WhisperModel(MODEL, device="cpu", compute_type="int8", cpu_threads=THREADS)
@@ -223,7 +303,13 @@ def main(argv=None, model_factory=load_model):
     ap.add_argument("--redo", metavar="FILE", help="transcribe this recording again")
     ap.add_argument("--redo-day", metavar="YYYY-MM-DD", help="transcribe every recording from that day again")
     ap.add_argument("--check", metavar="FILE", help="show loudness and detected speech for one recording")
+    ap.add_argument("--tidy", action="store_true", help="only delete old WAVs (see PENDANT_KEEP_WAV_DAYS)")
     args = ap.parse_args(argv)
+
+    if args.tidy:
+        run_tidy(ARCHIVE)
+        return 0
+    nightly = not (args.redo or args.redo_day or args.list or args.limit)
 
     if args.check:
         return check(Path(args.check).expanduser().with_suffix(".wav"))
@@ -249,6 +335,8 @@ def main(argv=None, model_factory=load_model):
         return 0
     if not todo:
         log("Nothing new to transcribe.")
+        if nightly:
+            run_tidy(ARCHIVE)
         return 0
 
     ARCHIVE.mkdir(parents=True, exist_ok=True)
@@ -274,6 +362,8 @@ def main(argv=None, model_factory=load_model):
         speed = f", {audio / took:.1f}x real time" if took > 0 and audio else ""
         log(f"  {wav.name}: {n} lines from {audio / 60:.1f} min of audio in {took / 60:.1f} min{speed}")
     log("Done." if not failed else f"Done, {failed} failed (they'll be tried again).")
+    if nightly:
+        run_tidy(ARCHIVE)
     return 1 if failed else 0
 
 
