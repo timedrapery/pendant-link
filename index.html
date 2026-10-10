@@ -193,7 +193,8 @@ a{color:var(--accent)}
   const logEl=$("log");
 
   let device=null, server=null, ctrlChar=null, dataChar=null;
-  let msgIndex=0, reqId=0;
+  let msgIndex=0, reqId=0, connecting=false;
+  const sleep=ms=>new Promise(r=>setTimeout(r,ms));
   const frags={}; // reassembly by message index
 
   // ---------- logging ----------
@@ -366,9 +367,23 @@ a{color:var(--accent)}
       device=await navigator.bluetooth.requestDevice(opts);
       device.addEventListener("gattserverdisconnected",onDisconnect);
       log("","selected: "+(device.name||"unnamed")+" ("+device.id+")");
-      setStatus("busy","Connecting…","Bonding may prompt you on first connect.");
-      server=await device.gatt.connect();
-      const svc=await server.getPrimaryService(SVC);
+      connecting=true;
+      let svc=null;
+      for(let i=1;i<=5 && !svc;i++){
+        try{
+          setStatus("busy","Connecting… ("+i+"/5)","First connect may pause to pair — allow it if asked.");
+          server=await device.gatt.connect();
+          await sleep(700);                     // let bonding settle
+          if(!device.gatt.connected) throw new Error("link dropped after connect");
+          svc=await server.getPrimaryService(SVC);
+        }catch(err){
+          log("err","attempt "+i+": "+err.message);
+          try{ if(device.gatt.connected) device.gatt.disconnect(); }catch(_){}
+          await sleep(1000);
+        }
+      }
+      connecting=false;
+      if(!svc) throw new Error("couldn’t hold the connection — tap the pendant to wake it and try again");
       ctrlChar=await svc.getCharacteristic(CTRL);
       dataChar=await svc.getCharacteristic(DATA);
       await dataChar.startNotifications();
@@ -378,6 +393,7 @@ a{color:var(--accent)}
       bConnect.disabled=true;bRefresh.disabled=false;bDisc.disabled=false;
       await readAll();
     }catch(e){
+      connecting=false;
       if(e&&e.name==="NotFoundError"){
         setStatus("","Not connected","No device selected or none found.");
         const b=$("ctxBanner");b.hidden=false;b.className="banner";
@@ -387,6 +403,7 @@ a{color:var(--accent)}
     }
   }
   function onDisconnect(){
+    if(connecting) return;
     setStatus("","Disconnected","Tap connect to reconnect.");
     bConnect.disabled=false;bRefresh.disabled=true;bDisc.disabled=true;
     ctrlChar=dataChar=server=null;
