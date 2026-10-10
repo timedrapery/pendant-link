@@ -133,10 +133,10 @@ index 22b2dea..bcf2dd3 100644
  
  message BleStatus {
 diff --git a/src/pendant/commands/device.py b/src/pendant/commands/device.py
-index e05b050..fea1233 100644
+index e05b050..b2c657c 100644
 --- a/src/pendant/commands/device.py
 +++ b/src/pendant/commands/device.py
-@@ -76,18 +76,20 @@ def listen(ctx, timeout):
+@@ -76,18 +76,24 @@ def listen(ctx, timeout):
          timestamp = datetime.now().strftime("%H:%M:%S")
          
          if rtype == "button_status":
@@ -156,10 +156,14 @@ index e05b050..fea1233 100644
 -            recording = response.get("is_recording", False)
 -            storage = response.get("storage_used_percent", 0)
 -            click.echo(f"[{timestamp}] Status: recording={recording}, storage={storage}%")
-+            recording = response.get("recording_label", "unknown")
++            parts = []
++            if response.get("recording_state") is not None:
++                parts.append(response["recording_label"])
 +            used, total = response.get("storage_used_pages"), response.get("storage_total_pages")
-+            storage = f"{used}/{total} pages" if used is not None and total else "unknown"
-+            click.echo(f"[{timestamp}] Status: {recording}, storage {storage}")
++            if used is not None and total:
++                parts.append(f"storage {used}/{total} pages")
++            if parts:
++                click.echo(f"[{timestamp}] Status: {', '.join(parts)}")
          elif rtype and rtype != "parse_error":
              click.echo(f"[{timestamp}] Event: {rtype}")
  
@@ -247,7 +251,7 @@ index a5867ef..39448a6 100644
  
          if self.on_response:
 diff --git a/src/pendant/core/protocol.py b/src/pendant/core/protocol.py
-index c342f7e..1918488 100644
+index c342f7e..7c9920e 100644
 --- a/src/pendant/core/protocol.py
 +++ b/src/pendant/core/protocol.py
 @@ -10,6 +10,36 @@ from .config import KEYS_DIR
@@ -301,8 +305,8 @@ index c342f7e..1918488 100644
 +                    "oldest_flash_page": info.oldest_flash_page,
 +                    "newest_flash_page": info.newest_flash_page,
 +                    "factory_reset_id": info.factory_reset_id,
-+                    "ble_mac_address": ":".join(f"{b:02X}" for b in info.ble_mac_address),
-+                    "has_audio_encryption_key": bool(info.device_audio_encryption_pub_key),
++                    "ble_mac_address": ":".join(f"{b:02X}" for b in reversed(info.ble_mac_address)),  # sent little-endian
++                    "has_device_public_key": bool(info.device_audio_encryption_pub_key),
                  })
 +                if info.HasField("device_status"):
 +                    result["status"] = _status_dict(info.device_status)
@@ -354,13 +358,15 @@ index c342f7e..1918488 100644
                  })
  
              # Extract response_data if present
-@@ -381,6 +399,37 @@ class PendantProtocol:
+@@ -381,6 +399,40 @@ class PendantProtocol:
              return None
  
  
 +def format_status_lines(st: dict) -> list:
 +    """Human-readable lines for a flattened DeviceStatus."""
-+    lines = [f"  Recording: {st.get('recording_label', 'unknown')}"]
++    lines = []
++    if st.get("recording_state") is not None:
++        lines.append(f"  Recording: {st['recording_label']}")
 +    used, total = st.get("storage_used_pages"), st.get("storage_total_pages")
 +    if used is not None and total:
 +        lines.append(f"  Storage: {used} of {total} pages used ({st.get('storage_used_percent', 0)}%)")
@@ -383,7 +389,8 @@ index c342f7e..1918488 100644
 +    if info.get("battery_percent"):
 +        lines.append(f"  Battery: {info['battery_percent']}%")
 +    lines.append(f"  Flash pages: oldest {info.get('oldest_flash_page', 0)}, newest {info.get('newest_flash_page', 0)}")
-+    lines.append(f"  Audio encryption key set: {'yes' if info.get('has_audio_encryption_key') else 'no'}")
++    lines.append(f"  Device public key: {'present' if info.get('has_device_public_key') else 'none'} "
++                 "(the pendant's own key; it doesn't mean recordings are encrypted)")
 +    if info.get("status"):
 +        lines.extend(format_status_lines(info["status"]))
 +    return lines
@@ -416,7 +423,7 @@ index cdd3ff3..3b84f90 100644
      status = pb.DeviceStatus()
      status.storage_state.CopyFrom(storage)
 diff --git a/tests/test_protocol.py b/tests/test_protocol.py
-index ad39d00..c18a2b7 100644
+index ad39d00..bd88337 100644
 --- a/tests/test_protocol.py
 +++ b/tests/test_protocol.py
 @@ -73,6 +73,8 @@ class TestPendantProtocol:
@@ -428,7 +435,7 @@ index ad39d00..c18a2b7 100644
  
      def test_parse_device_status_response(self, protocol, sample_device_status_response):
          """Test parsing a device_status response."""
-@@ -80,9 +82,33 @@ class TestPendantProtocol:
+@@ -80,9 +82,34 @@ class TestPendantProtocol:
          assert result is not None
          assert result["type"] == "device_status"
          assert result["is_recording"] is True
@@ -454,11 +461,33 @@ index ad39d00..c18a2b7 100644
 +        msg.device_info.serial_number = "PND-1"
 +        msg.device_info.firmware_version = "1.4.2"
 +        msg.device_info.ble_mac_address = bytes.fromhex("c272bcf1883f")
++        # (test feeds big-endian bytes, so the reversed display is expected here)
 +        result = protocol.parse_response(msg.SerializeToString())
 +        assert result["firmware_version"] == "1.4.2"
 +        assert result["serial_number"] == "PND-1"
-+        assert result["ble_mac_address"] == "C2:72:BC:F1:88:3F"
++        assert result["ble_mac_address"] == "3F:88:F1:BC:72:C2"  # wire bytes are little-endian
 +
      def test_extract_audio_from_flash_page(self, protocol, sample_flash_page_data):
          """Test extracting audio data from a flash page."""
          opus, pcm, encrypted, codec_type, page_info = protocol.extract_audio_from_flash_page(
+@@ -176,3 +203,20 @@ class TestExistingCommands:
+         cmd = protocol.create_command("set_server_public_key", public_key=fake_key)
+         assert isinstance(cmd, bytes)
+         assert len(cmd) > 0
++
++
++def test_mac_address_from_pendant_wire_order(protocol):
++    """The pendant sends its MAC little-endian; it should display in normal order."""
++    from pendant.core.proto import pb
++    msg = pb.PendantAllMsg()
++    msg.device_info.ble_mac_address = bytes.fromhex("3f88f1bc72c2")  # as observed from a real pendant
++    result = protocol.parse_response(msg.SerializeToString())
++    assert result["ble_mac_address"] == "C2:72:BC:F1:88:3F"
++
++
++def test_partial_status_omits_recording_line():
++    """A status update without recording_status should not print 'unknown'."""
++    from pendant.core.protocol import format_status_lines
++    lines = format_status_lines({"recording_state": None, "storage_used_pages": 5, "storage_total_pages": 100,
++                                 "storage_used_percent": 5.0})
++    assert not any("Recording" in l for l in lines)
