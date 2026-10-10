@@ -6,12 +6,12 @@ set -euo pipefail
 
 REF="${1:-main}"
 BASE="https://raw.githubusercontent.com/timedrapery/pendant-link/$REF/pi"
-ADDRESS="${PENDANT_ADDRESS:-}"
+ADDRESS="${PENDANT_ADDRESS:-$(sed -n 's/^PENDANT_ADDRESS=//p' "$HOME/.config/pendant/env" 2>/dev/null | tail -1)}"
 
 say() { echo "==> $*"; }
 
 if [ -z "$ADDRESS" ]; then
-  echo "PENDANT_ADDRESS isn't set in this shell. Run: export PENDANT_ADDRESS=AA:BB:CC:DD:EE:FF  (your pendant's address), then rerun."
+  echo "Your pendant's address isn't known yet. Run: export PENDANT_ADDRESS=AA:BB:CC:DD:EE:FF  then rerun."
   exit 1
 fi
 if [ ! -d "$HOME/pendant-cli/.git" ]; then
@@ -51,7 +51,18 @@ chmod +x "$HOME/.local/share/pendant/pendant-sync"
 rm -f "$HOME/.local/bin/pendant-sync"   # older installs put it here
 curl -fsSL "$BASE/pendant-sync.service" -o "$HOME/.config/systemd/user/pendant-sync.service"
 curl -fsSL "$BASE/pendant-sync.timer" -o "$HOME/.config/systemd/user/pendant-sync.timer"
-printf "PENDANT_ADDRESS=%s\nPENDANT_BIN=%s\n" "$ADDRESS" "$PENDANT_BIN" > "$HOME/.config/pendant/env"
+# Update only our two lines in the settings file; keep everything else (web password, options).
+ENV="$HOME/.config/pendant/env"
+touch "$ENV"
+set_setting() {
+  if grep -q "^$1=" "$ENV"; then
+    sed -i "s|^$1=.*|$1=$2|" "$ENV"
+  else
+    echo "$1=$2" >> "$ENV"
+  fi
+}
+set_setting PENDANT_ADDRESS "$ADDRESS"
+set_setting PENDANT_BIN "$PENDANT_BIN"
 systemctl --user daemon-reload
 
 say "Installed. Next: run 'pendant sync' once by hand and check ~/recordings."

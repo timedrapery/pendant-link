@@ -258,7 +258,7 @@ def test_tidy_deletes_only_old_safe_wavs(tr, tmp_path):
     no_opus = _day_files(tmp_path, "2026-10-10", "pendant_20261010_100000", opus=False)
     no_txt = _day_files(tmp_path, "2026-10-10", "pendant_20261010_110000", txt=False)
     recent = _day_files(tmp_path, "2026-10-20", "pendant_20261020_090000")
-    deleted, freed = tr.tidy(tmp_path, "14", today=today)
+    deleted, freed = tr.tidy(tmp_path, "14", today=today, verify=lambda opus: True)
     assert deleted == 1 and freed > 0
     assert not old.with_suffix(".wav").exists()
     assert old.with_suffix(".opus").exists() and old.with_suffix(".txt").exists()
@@ -270,8 +270,8 @@ def test_tidy_deletes_only_old_safe_wavs(tr, tmp_path):
 def test_tidy_never_and_bad_values_keep_everything(tr, tmp_path):
     from datetime import date
     old = _day_files(tmp_path, "2026-01-01", "pendant_20260101_090000")
-    assert tr.tidy(tmp_path, "never", today=date(2026, 10, 30)) == (0, 0)
-    assert tr.tidy(tmp_path, "two weeks", today=date(2026, 10, 30)) == (0, 0)
+    assert tr.tidy(tmp_path, "never", today=date(2026, 10, 30), verify=lambda o: True) == (0, 0)
+    assert tr.tidy(tmp_path, "two weeks", today=date(2026, 10, 30), verify=lambda o: True) == (0, 0)
     assert old.with_suffix(".wav").exists()
 
 
@@ -294,3 +294,26 @@ def test_setting_reads_env_file(tr, tmp_path, monkeypatch):
     assert tr.setting("PENDANT_KEEP_WAV_DAYS", "14") == "30"
     monkeypatch.setenv("PENDANT_KEEP_WAV_DAYS", "7")
     assert tr.setting("PENDANT_KEEP_WAV_DAYS", "14") == "7"
+
+
+def test_tidy_keeps_wav_when_opus_is_corrupt(tr, tmp_path):
+    from datetime import date
+    bad = _day_files(tmp_path, "2026-10-01", "pendant_20261001_090000")
+    bad.with_suffix(".opus").write_bytes(b"not really opus data, but nonempty")
+    deleted, _ = tr.tidy(tmp_path, "14", today=date(2026, 10, 30), verify=lambda opus: False)
+    assert deleted == 0 and bad.with_suffix(".wav").exists()
+
+
+def test_opus_decodes_uses_the_real_decoder(tr, tmp_path, monkeypatch):
+    good = tmp_path / "good.opus"; good.write_bytes(b"x")
+    bad = tmp_path / "bad.opus"; bad.write_bytes(b"x")
+    fake = tmp_path / "pendant"
+    # decode writes a 2-second WAV for "good", fails for "bad"
+    fake.write_text(
+        "#!/bin/sh\ncase \"$2\" in *good*) python3 -c \"import wave,sys;w=wave.open(sys.argv[1],'wb');"
+        "w.setnchannels(1);w.setsampwidth(2);w.setframerate(16000);w.writeframes(b'\\\\x00'*64000);w.close()\" \"$3\";;"
+        " *) exit 1;; esac\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PENDANT_BIN", str(fake))
+    assert tr.opus_decodes(good) is True
+    assert tr.opus_decodes(bad) is False

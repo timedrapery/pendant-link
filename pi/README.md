@@ -177,7 +177,15 @@ sudo loginctl enable-linger "$USER"
 
 Check it's scheduled: `systemctl --user list-timers` shows **pendant-sync.timer** with a NEXT time (press `q` to get your prompt back). If NEXT shows `-`, a sync is probably running right now; check again in a minute.
 
-**How freeing works.** The sync frees pages only after the files are confirmed on disk, and only through the last page of an unbroken run it actually received. If a page went missing, everything after the gap stays on the pendant. If any audio can't be decrypted, nothing is freed.
+**How freeing works, exactly.** After a download, the sync asks the pendant to delete pages only when all of these hold:
+
+- the saved files exist on disk and aren't empty;
+- the download started at the pendant's own oldest stored page (it asks the pendant which that is; if the two don't match, nothing is deleted);
+- it deletes only through the end of an unbroken run of pages: if a page went missing in the middle, everything from the gap on stays on the pendant;
+- it stops before any page the pendant flagged as unreadable, or that couldn't be parsed, so that page gets another try next time;
+- nothing is deleted if any audio couldn't be decrypted (those chunks are saved whole in a `.enc.jsonl` file).
+
+What this doesn't cover: the files are written with ordinary writes, so a power cut in the few seconds between saving and freeing could in theory lose that one sync's audio; the WAV is decoded after freeing (the `.opus` is what's kept, and the WAV can always be rebuilt from it); and the backup runs nightly, so until then the Pi holds the only copy. If that gap matters to you, keep `--delete-after` off (edit `~/.local/share/pendant/pendant-sync`) and clear the pendant by hand now and then.
 
 ## 7. Your own encryption key
 
@@ -251,7 +259,7 @@ systemctl --user enable --now pendant-transcribe.timer
 
 On a Pi 4 it runs about 1.4× faster than real time for steady talking, and far faster through quiet stretches, so a full day finishes overnight. The pendant records only when it hears speech, so a quiet day gives a short transcript. That's expected.
 
-**Tidying up.** WAVs are about 15 times bigger than the compact `.opus` audio. After each nightly run, WAVs from more than 14 days ago are deleted, but only when that recording's `.opus` and transcript are both there. To listen to an old one again, rebuild it: `pendant decode ~/recordings/<day>/<file>.opus`. Each run also logs how much space is free and warns when the card is getting full. Keep WAVs longer (or shorter) with `PENDANT_KEEP_WAV_DAYS=30` in `~/.config/pendant/env`, or set it to `never`. `pendant transcribe --tidy` tidies right away.
+**Tidying up.** WAVs are about 15 times bigger than the compact `.opus` audio. After each nightly run, WAVs from more than 14 days ago are deleted, but only when that recording has a transcript and its `.opus` has just been test-decoded successfully, so a corrupt compact file never costs the playable copy. To listen to an old one again, rebuild it: `pendant decode ~/recordings/<day>/<file>.opus`. Each run also logs how much space is free and warns when the card is getting full. Keep WAVs longer (or shorter) with `PENDANT_KEEP_WAV_DAYS=30` in `~/.config/pendant/env`, or set it to `never`. `pendant transcribe --tidy` tidies right away.
 
 Settings, in `~/.config/pendant/env` or before the command: `PENDANT_WHISPER_MODEL` (`base.en` by default; `tiny.en` is faster, `small.en` more accurate but may not keep up on a Pi 4), `PENDANT_WHISPER_BEAM` (1; higher is slower and slightly more accurate).
 
@@ -404,7 +412,7 @@ That leaves your recordings (`~/recordings`) and keys (`~/.config/pendant`) alon
 
 ## What the pendant-cli patch changes
 
-`pendant-cli-fixes.patch` fixes how [pendant-cli](https://github.com/sdelcore/pendant-cli) reads the pendant and adds what this guide uses. Message layouts come from the Limitless Android app. It applies cleanly to upstream commit `1c71659` and passes pendant-cli's tests (93, including 11 for the page-freeing logic and 13 for encryption). The installer in step 6 applies it; it resets pendant-cli to its original files first, so it's safe to rerun.
+`pendant-cli-fixes.patch` fixes how [pendant-cli](https://github.com/sdelcore/pendant-cli) reads the pendant and adds what this guide uses. Message layouts come from the Limitless Android app. It applies cleanly to upstream commit `1c71659` and passes pendant-cli's tests (99, including 17 for the page-freeing logic and 14 for encryption). The installer in step 6 applies it; it resets pendant-cli to its original files first (removing files an earlier version of the patch added), and only updates its own two lines in `~/.config/pendant/env`, so it's safe to rerun. Your own changes to pendant-cli's files, if any, would be lost.
 
 **Reading the pendant correctly**
 - **Recording status** shows the real state: not recording, recording, or listening (armed to record when it hears speech), which pendant-cli used to print as `False`.
@@ -415,7 +423,7 @@ That leaves your recordings (`~/recordings`) and keys (`~/.config/pendant`) alon
 
 **Encryption, rebuilt to match the app.** pendant-cli assumed X25519 keys and a NaCl sealed box. The app (read from its JavaScript bundle) uses P-256 ECDH, HKDF-SHA256 with empty salt and info, and AES-128-GCM, and the encrypted-audio message is nonce (field 1), ciphertext (2), tag (3), packet offsets (4); pendant-cli had nonce and ciphertext swapped. `pendant crypto setkey`, `status` and `decrypt` now follow the app. The key derivation was checked against WebCrypto, the API the app uses.
 
-**Downloading safely.** `pendant download` stops once the pendant goes quiet (`--idle-timeout`) and can free pages afterwards (`--delete-after`): only after the files are confirmed on disk, only through the end of an unbroken run, and never if any audio couldn't be decrypted.
+**Downloading safely.** `pendant download` stops once the pendant goes quiet (`--idle-timeout`) and can free pages afterwards (`--delete-after`), under the rules in step 6: files saved, run starts at the pendant's oldest page, unbroken, stops before unreadable or unparseable pages, nothing freed if anything couldn't be decrypted.
 
 **New commands:** `pendant sync`, `pendant backup`, `pendant transcribe` (which run the scripts in this folder), and `pendant led`.
 

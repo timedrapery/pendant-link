@@ -236,8 +236,34 @@ def check(wav: Path):
     return 0
 
 
-def tidy(archive: Path, keep_days, today=None):
-    """Delete WAVs from days older than keep_days when their .opus and transcript exist.
+def opus_decodes(opus: Path, min_seconds=1.0):
+    """True if the compact audio really decodes (via `pendant decode` into a scratch file).
+
+    A WAV is only deleted once this passes, so a corrupt .opus never costs the playable copy.
+    """
+    import subprocess
+    import tempfile
+
+    pendant = setting("PENDANT_BIN", "pendant")
+    with tempfile.TemporaryDirectory(prefix="pendant-tidy-") as d:
+        out = Path(d) / "check.wav"
+        try:
+            r = subprocess.run([pendant, "decode", str(opus), str(out)],
+                               capture_output=True, text=True, timeout=900)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        if r.returncode != 0 or not out.exists():
+            return False
+        try:
+            import wave
+            with wave.open(str(out), "rb") as w:
+                return w.getnframes() / max(w.getframerate(), 1) >= min_seconds
+        except (OSError, wave.Error, EOFError):
+            return False
+
+
+def tidy(archive: Path, keep_days, today=None, verify=opus_decodes):
+    """Delete WAVs from days older than keep_days when their .opus decodes and a transcript exists.
 
     Returns (files deleted, bytes freed). keep_days "never" keeps everything.
     """
@@ -262,6 +288,9 @@ def tidy(archive: Path, keep_days, today=None):
             opus, txt = wav.with_suffix(".opus"), wav.with_suffix(".txt")
             if not (opus.is_file() and opus.stat().st_size > 0 and txt.is_file()):
                 continue  # not safe to delete: nothing to rebuild it from, or not transcribed yet
+            if not verify(opus):
+                log(f"  keeping {wav.name}: its .opus didn't decode cleanly")
+                continue
             size = wav.stat().st_size
             wav.unlink()
             deleted += 1

@@ -6,7 +6,7 @@ Limitless was acquired by Meta in December 2025, and support for the pendant end
 
 ## What you get
 
-- **Automatic sync.** Every 15 minutes the Pi pulls new recordings off the pendant whenever it's in range, files them by day, and only then frees the space on the pendant. If anything goes wrong, nothing is deleted.
+- **Automatic sync.** Every 15 minutes the Pi pulls new recordings off the pendant whenever it's in range, files them by day, and only then frees the space on the pendant. It frees pages only after the files are saved, only in an unbroken run starting from the pendant's oldest page, never past a page it couldn't read, and never if any audio couldn't be decrypted. (The exact rules, and what they don't cover, are in the guide.)
 - **Your own encryption key.** The pendant encrypts what it records so only your Pi can read it (the same scheme the Limitless app used, with your key instead of theirs).
 - **Transcripts made on the Pi.** Each night the recordings become text with real clock times, using an open speech-to-text model that runs on the Pi. No audio is sent anywhere to be transcribed.
 - **Stars.** One quick press of the pendant button marks a moment ("keep this"), as in the Limitless app. Lines around it are starred in the transcript.
