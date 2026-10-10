@@ -25,7 +25,7 @@ log "Backing up $ARCHIVE"
 rclone copy "$ARCHIVE" "$REMOTE" \
   --exclude ".incoming/**" \
   --exclude "*.wav" \
-  --exclude ".sync.lock" \
+  --exclude "*.lock" \
   --exclude "*.log" \
   --exclude "*.tmp" \
   --transfers 2 \
