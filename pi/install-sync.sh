@@ -27,8 +27,13 @@ fi
 
 say "Applying pendant-cli fixes ($REF)"
 cd "$HOME/pendant-cli"
+PATCH="$(mktemp)"
+curl -fsSL "$BASE/pendant-cli-fixes.patch" -o "$PATCH"
+# Back to the original files: undo edits, and remove files an earlier version of the patch added.
 git checkout -- .
-curl -fsSL "$BASE/pendant-cli-fixes.patch" | git apply
+awk '/^diff --git /{f=$4} /^new file mode/{sub(/^b\//,"",f); print f}' "$PATCH" | while read -r f; do rm -f -- "$f"; done
+git apply "$PATCH"
+rm -f "$PATCH"
 protoc -I proto --python_out=proto proto/pendant.proto
 cd "$HOME"
 
