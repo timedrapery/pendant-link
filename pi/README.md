@@ -12,11 +12,13 @@
 - Status updates that leave out the recording state no longer print "unknown".
 - `pendant info` waits for the pendant's reply (asking again once if needed, up to 10 seconds) instead of giving up after 3.
 - New `pendant sync` command runs the automatic sync below.
+- **Encryption rebuilt to match the Limitless app.** pendant-cli assumed X25519 keys and a NaCl sealed box; the app (read from its JavaScript bundle) uses P-256 ECDH, HKDF-SHA256 with empty salt and info, and AES-128-GCM. `pendant crypto setkey` now does that, checked against WebCrypto. Audio that can't be decrypted is saved whole (`.enc.jsonl`) and its pages are never freed.
+- The pendant's command replies (`ResponseData`) use the app's layout, so errors are reported.
 - Messages that fail to decode are printed instead of silently dropped.
 - `pendant download` stops once the pendant goes quiet (`--idle-timeout`, default 8 s) and can free pages afterward (`--delete-after`). It frees only after the saved files are confirmed on disk, and only through the last page in an unbroken run it received, so a gap is never deleted.
 - The docs' `protoc` command gains `-I proto`, so the generated file lands in `proto/`.
 
-It applies cleanly to upstream commit `1c71659` and passes pendant-cli's test suite (68 tests, including 11 for the freeing logic).
+It applies cleanly to upstream commit `1c71659` and passes pendant-cli's test suite (79 tests, including 11 for the freeing logic and 11 for encryption).
 
 ### Apply on the Pi
 
@@ -50,4 +52,20 @@ systemctl --user enable --now pendant-sync.timer
 sudo loginctl enable-linger "$USER"   # keeps it running when you're not logged in
 ```
 
-Logs: `journalctl --user -u pendant-sync`. To stop: `systemctl --user disable --now pendant-sync.timer`.
+Log: `~/recordings/sync.log` (or `systemctl --user status pendant-sync.service`). To stop: `systemctl --user disable --now pendant-sync.timer`.
+
+## Your own encryption key
+
+```
+systemctl --user stop pendant-sync.timer   # pause while setting up
+pendant sync                               # pull what's on the pendant now
+pendant crypto setkey
+```
+
+Then speak near the pendant for half a minute and check it decrypts, without freeing anything:
+
+```
+mkdir -p ~/enctest && pendant download --decode -o ~/enctest
+```
+
+It should say "Loaded your audio key", and no "couldn't be decrypted" line. Back up `~/.config/pendant/keys/`, then `systemctl --user start pendant-sync.timer`.

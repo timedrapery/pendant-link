@@ -25,6 +25,13 @@ fi
 
 mkdir -p "$INCOMING"
 
+# Keep a plain log next to the recordings (last ~2000 lines), as well as the systemd journal.
+LOG="$ARCHIVE/sync.log"
+if [ -f "$LOG" ] && [ "$(wc -l < "$LOG")" -gt 4000 ]; then
+  tail -n 2000 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
+fi
+exec > >(tee -a "$LOG") 2>&1
+
 # One sync at a time.
 exec 9>"$ARCHIVE/.sync.lock"
 if ! flock -n 9; then

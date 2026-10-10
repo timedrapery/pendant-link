@@ -12,10 +12,20 @@ index dd63bcd..d61dbe7 100644
  
  ## Build & Run Commands
 diff --git a/CLAUDE.md b/CLAUDE.md
-index 031a41f..a3b2ebe 100644
+index 031a41f..ce2331b 100644
 --- a/CLAUDE.md
 +++ b/CLAUDE.md
-@@ -39,7 +39,7 @@ pendant explore             # Explore GATT services
+@@ -31,15 +31,15 @@ pendant bt status           # Check connection status
+ pendant bt scan             # Scan for BLE devices
+ 
+ # Encryption
+-pendant crypto keygen       # Generate encryption keypair
+-pendant crypto setkey       # Send public key to device
++pendant crypto setkey       # Encrypt new recordings with your own key (P-256, AES-GCM)
++pendant crypto status       # Show which keys are set up
+ 
+ # Debug
+ pendant explore             # Explore GATT services
  pendant debug               # Download with detailed flash page inspection
  
  # Regenerate protobuf (if proto/pendant.proto changes)
@@ -25,10 +35,65 @@ index 031a41f..a3b2ebe 100644
  
  ## Architecture
 diff --git a/README.md b/README.md
-index bd3dc3e..8adee21 100644
+index bd3dc3e..b0d5d99 100644
 --- a/README.md
 +++ b/README.md
-@@ -184,7 +184,7 @@ without their private key. Only new recordings after `setkey` will use your key.
+@@ -66,8 +66,8 @@ pendant bt disconnect       # Disconnect (keeps pairing)
+ pendant bt status           # Check connection status
+ 
+ # Encryption
+-pendant crypto keygen       # Generate X25519 keypair
+-pendant crypto setkey       # Send public key to device
++pendant crypto setkey       # Encrypt new recordings with your own key
++pendant crypto status       # Show which keys are set up
+ 
+ # Debug
+ pendant explore             # Explore GATT services
+@@ -130,26 +130,28 @@ ffmpeg -f s16le -ar 16000 -ac 1 -i pendant_audio.raw output.wav
+ 
+ ## Encryption
+ 
+-The Pendant supports optional audio encryption using X25519 key exchange with ChaCha20-Poly1305.
++The pendant can encrypt its recordings so only you can read them. This matches what the
++Limitless app does (read from its JavaScript bundle, v2.1.6):
+ 
+-### Setting Your Own Encryption Key
+-
+-By default, recordings are encrypted with Limitless's server key. You can inject your own
+-key to decrypt future recordings:
++- The pendant has its own P-256 key pair and reports the public half in its device info.
++- You make a second P-256 key pair and send the pendant your raw 65-byte public key.
++- Both sides compute ECDH-P256, then HKDF-SHA256 (empty salt and info) to a 128-bit key.
++- Each audio chunk is AES-128-GCM with its own nonce and tag.
+ 
+ ```bash
+-# 1. Generate X25519 keypair (saved to keys/ directory)
+-pendant crypto keygen
+-
+-# 2. Send public key to device
+-pendant crypto setkey
+-
+-# 3. Download recordings (auto-decrypts with your private key)
+-pendant download
++pendant crypto setkey     # makes your key pair if needed, saves the audio key, sends your public key
++pendant crypto status     # what's set up
++pendant download          # decrypts with your audio key
++pendant crypto decrypt FILE.enc.jsonl   # decrypt chunks saved earlier
+ ```
+ 
+-**Important:** Existing recordings encrypted with Limitless's key cannot be decrypted
+-without their private key. Only new recordings after `setkey` will use your key.
++Keys live in `~/.config/pendant/keys/`. `audio.key` is all you need to decrypt, so back it up:
++without it, recordings still on the pendant can't be read. If any audio can't be decrypted,
++`download --delete-after` keeps every page on the pendant and saves the chunks whole in a
++`.enc.jsonl` file.
++
++Only recordings made after `setkey` use your key. A factory reset clears it (the pendant then
++records unencrypted). If the Limitless app connects again, it may replace your key with its own.
+ 
+ ## Troubleshooting
+ 
+@@ -184,7 +186,7 @@ without their private key. Only new recordings after `setkey` will use your key.
  
  Generate protobuf Python code:
  ```bash
@@ -51,7 +116,7 @@ index e21933f..d005482 100644
  
              # Sync dependencies with uv
 diff --git a/proto/pendant.proto b/proto/pendant.proto
-index 22b2dea..52cb2dc 100644
+index 22b2dea..0217774 100644
 --- a/proto/pendant.proto
 +++ b/proto/pendant.proto
 @@ -73,7 +73,8 @@ message SetLed { int32 state = 1; }
@@ -64,7 +129,15 @@ index 22b2dea..52cb2dc 100644
  message DownloadFlashPages {
    bool batch_mode_enabled = 1;
    bool real_time_mode_enabled = 2;
-@@ -124,12 +125,24 @@ message PendantAllMsg {
+@@ -97,6 +98,7 @@ message SetVADThreshold { float threshold = 1; }
+ message ClearPendantStorage {}
+ message SetLEDBrightness { int32 brightness = 1; }
+ message SetDeviceOnShippingMode {}
++// Raw 65-byte uncompressed P-256 public key (the app's "server" key).
+ message SetServerPublicKey { bytes public_key = 1; }
+ message PrepareForFirmwareUpdate {}
+ message SyncFirmwareUpdateState {}
+@@ -124,12 +126,24 @@ message PendantAllMsg {
    optional ResponseData response_data = 6;
  }
  
@@ -94,7 +167,7 @@ index 22b2dea..52cb2dc 100644
  }
  
  message StorageBufferMsg {
-@@ -212,7 +225,24 @@ message BatteryStatus {
+@@ -212,10 +226,29 @@ message BatteryStatus {
    bool under_operating_temperature = 8;
    UsbState usb_state = 9;
  }
@@ -119,8 +192,14 @@ index 22b2dea..52cb2dc 100644
 +}
  message RealTimeAudioDataResponse { bytes data = 1; int64 seq = 2; }
  message RealTimeAudioAckResponse { int64 seq = 1; }
- message ResponseData { int32 request_id = 1; bool success = 2; }
-@@ -258,10 +288,18 @@ message Chunk {
+-message ResponseData { int32 request_id = 1; bool success = 2; }
++// Layout from the Limitless app (ServerProto$ResponseData): no error means success.
++message ResponseData { int64 request_id = 1; ServerCommandRequestError error = 2; }
++message ServerCommandRequestError { int32 category = 1; string error_message = 2; }
+ 
+ enum IngestType {
+   INGEST_TYPE_UNSPECIFIED = 0;
+@@ -258,10 +291,18 @@ message Chunk {
  }
  
  // Additional status messages for Chunk
@@ -142,6 +221,18 @@ index 22b2dea..52cb2dc 100644
  }
  
  message BleStatus {
+diff --git a/pyproject.toml b/pyproject.toml
+index aae62ae..0924185 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -23,6 +23,7 @@ dependencies = [
+     "dbus-python>=1.3.0",
+     "PyGObject>=3.44.0",
+     "pynacl>=1.5.0",
++    "cryptography>=3.4",
+     "click>=8.1.0",
+ ]
+ 
 diff --git a/src/pendant/cli.py b/src/pendant/cli.py
 index fb98890..e3228ea 100644
 --- a/src/pendant/cli.py
@@ -164,7 +255,7 @@ index fb98890..e3228ea 100644
  # Register command groups
  cli.add_command(bluetooth.bt)
 diff --git a/src/pendant/commands/audio.py b/src/pendant/commands/audio.py
-index cf0b2e6..0e71f17 100644
+index cf0b2e6..14df308 100644
 --- a/src/pendant/commands/audio.py
 +++ b/src/pendant/commands/audio.py
 @@ -1,6 +1,7 @@
@@ -199,6 +290,15 @@ index cf0b2e6..0e71f17 100644
      """Download stored recordings from the pendant."""
      from gi.repository import GLib
  
+@@ -28,7 +35,7 @@ def download(ctx, decode, output):
+     # Try to load private key for decryption
+     client.private_key = load_private_key()
+     if client.private_key:
+-        click.echo("Loaded encryption key for decryption")
++        click.echo("Loaded your audio key for decryption")
+ 
+     if not client.connect():
+         raise click.ClickException("Failed to connect to device")
 @@ -42,8 +49,31 @@ def download(ctx, decode, output):
          return False
  
@@ -233,7 +333,7 @@ index cf0b2e6..0e71f17 100644
  
      # Save audio
      click.echo(f"\n\nDownload complete!")
-@@ -72,21 +102,25 @@ def download(ctx, decode, output):
+@@ -72,23 +102,32 @@ def download(ctx, decode, output):
          timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
  
      opus_fname = None
@@ -252,14 +352,26 @@ index cf0b2e6..0e71f17 100644
          click.echo(f"Saved: {fname}")
          click.echo(f"  Convert: ffmpeg -f s16le -ar 16000 -ac 1 -i {fname} output.wav")
  
-     if client.encrypted_data:
-         fname = output_dir / f"pendant_{timestamp}.enc"
-         fname.write_bytes(client.encrypted_data)
+-    if client.encrypted_data:
+-        fname = output_dir / f"pendant_{timestamp}.enc"
+-        fname.write_bytes(client.encrypted_data)
+-        click.echo(f"Saved encrypted: {fname}")
+-        click.echo("  To decrypt, run 'pendant crypto keygen' then 'pendant crypto setkey', then re-record and download")
++    undecrypted = getattr(getattr(client, "protocol", None), "undecrypted", [])
++    if undecrypted:
++        # Every chunk whole (nonce, ciphertext, tag), one per line, so it can be decrypted later.
++        fname = output_dir / f"pendant_{timestamp}.enc.jsonl"
++        fname.write_text("".join(json.dumps(r) + "\n" for r in undecrypted))
 +        written.append(fname)
-         click.echo(f"Saved encrypted: {fname}")
-         click.echo("  To decrypt, run 'pendant crypto keygen' then 'pendant crypto setkey', then re-record and download")
++        click.echo(f"Saved encrypted audio that couldn't be decrypted: {fname} ({len(undecrypted)} chunks)")
++        if client.private_key:
++            click.echo("  Your audio key didn't fit these chunks.")
++        else:
++            click.echo("  No audio key is set up here. See 'pendant crypto --help'.")
  
-@@ -109,6 +143,26 @@ def download(ctx, decode, output):
+     # Save timestamp metadata as JSON sidecar
+     if client.page_timestamps and client.opus_data:
+@@ -109,6 +148,29 @@ def download(ctx, decode, output):
          json_fname.write_text(json.dumps(metadata, indent=2))
          click.echo(f"Saved metadata: {json_fname}")
  
@@ -267,7 +379,10 @@ index cf0b2e6..0e71f17 100644
 +    if client.page_count:
 +        lo, hi = min(client.page_indices), max(client.page_indices)
 +        click.echo(f"  Page indexes: {lo} to {hi}" + (f" ({client.page_errors} flagged unreadable)" if client.page_errors else ""))
-+    if delete_after:
++    if delete_after and undecrypted:
++        click.echo("Some audio couldn't be decrypted, so nothing will be deleted from the pendant. "
++                   "It's all still there, and saved here too.")
++    elif delete_after:
 +        through = safe_delete_index(client.page_indices)
 +        if through is None:
 +            click.echo("Nothing downloaded, so nothing to delete.")
@@ -286,6 +401,203 @@ index cf0b2e6..0e71f17 100644
      # Auto-decode opus to WAV if requested
      if decode and opus_fname and opus_fname.exists():
          wav_fname = opus_fname.with_suffix('.wav')
+diff --git a/src/pendant/commands/crypto.py b/src/pendant/commands/crypto.py
+index cc35325..05354a7 100644
+--- a/src/pendant/commands/crypto.py
++++ b/src/pendant/commands/crypto.py
+@@ -1,60 +1,160 @@
+-"""Crypto commands: keygen, setkey."""
++"""Crypto commands: keygen, setkey, status, decrypt.
++
++Same scheme as the Limitless app; see pendant/core/audiocrypto.py.
++"""
++
++import json
++import shutil
++import time
++from pathlib import Path
+ 
+ import click
+ 
++from pendant.core import audiocrypto
+ from pendant.core.config import KEYS_DIR
+ from pendant.core.dbus_client import DBusClient
+-from pendant.core.protocol import generate_keypair
+ 
+ 
+ @click.group()
+ def crypto():
+-    """Encryption key management commands."""
++    """Encrypt recordings on the pendant with your own key."""
+     pass
+ 
+ 
+ @crypto.command()
+-def keygen():
+-    """Generate a new X25519 keypair for encryption."""
+-    private_file, public_file = generate_keypair()
+-
+-    if private_file and public_file:
+-        click.echo("Generated new X25519 keypair:")
+-        click.echo(f"  Private: {private_file}")
+-        click.echo(f"  Public:  {public_file}")
+-
+-        public_key_bytes = public_file.read_bytes()
+-        click.echo(f"\nPublic key (hex): {public_key_bytes.hex()}")
+-        click.echo("\nNext: Run 'pendant crypto setkey' to send public key to device")
+-    else:
+-        raise click.ClickException("Failed to generate keypair")
++@click.option('--force', is_flag=True, help='Replace an existing key pair (recordings made for the old key need the old audio.key).')
++def keygen(force):
++    """Make your P-256 key pair (setkey does this for you if needed)."""
++    try:
++        public_raw = audiocrypto.generate_keypair(force=force)
++    except FileExistsError as e:
++        raise click.ClickException(f"A key pair already exists ({e}). Use --force only if you mean to replace it.")
++    click.echo(f"Made a new key pair in {KEYS_DIR}")
++    click.echo(f"  Public key: {public_raw.hex()[:24]}...")
++    click.echo("Next: pendant crypto setkey")
+ 
+ 
+ @crypto.command()
+ @click.pass_context
+ def setkey(ctx):
+-    """Send our public key to the device."""
++    """Have the pendant encrypt new recordings so only this computer can read them."""
+     from gi.repository import GLib
+ 
+-    address = ctx.obj['address']
+-    public_file = KEYS_DIR / "public.key"
++    public_raw = audiocrypto.load_public_raw()
++    if public_raw is None:
++        public_raw = audiocrypto.generate_keypair()
++        click.echo(f"Made a new key pair in {KEYS_DIR}")
+ 
+-    if not public_file.exists():
+-        raise click.ClickException("No public key found. Run 'pendant crypto keygen' first.")
++    client = DBusClient(ctx.obj['address'])
++    replies = {"info": None, "response": None, "key_request_id": None}
+ 
+-    public_key_bytes = public_file.read_bytes()
+-    click.echo(f"Sending public key to device: {public_key_bytes.hex()[:32]}...")
++    def on_response(r):
++        if r.get("type") == "device_info":
++            replies["info"] = r
++        elif replies["key_request_id"] is not None and r.get("request_id") == replies["key_request_id"]:
++            replies["response"] = r
+ 
+-    client = DBusClient(address)
++    client.on_response = on_response
+     if not client.connect():
+         raise click.ClickException("Failed to connect to device")
+ 
+-    client.send_command("set_server_public_key", public_key=public_key_bytes)
++    try:
++        # 1. Ask for the pendant's own public key.
++        click.echo("\nAsking the pendant for its public key...")
++        client.send_command("get_device_info")
++        state = {"t": 0.0, "retried": False}
++
++        def wait_info():
++            if replies["info"] is not None:
++                client.stop()
++                return False
++            state["t"] += 0.5
++            if state["t"] >= 3 and not state["retried"]:
++                state["retried"] = True
++                client.send_command("get_device_info")
++            return True
++
++        GLib.timeout_add(500, wait_info)
++        client.run_with_timeout(10)
++        if replies["info"] is None:
++            raise click.ClickException("No reply from the pendant. Tap it to wake it and try again.")
++
++        device_raw = replies["info"].get("device_public_key", b"")
++        if not device_raw or not any(device_raw):
++            raise click.ClickException("The pendant didn't report a key of its own, so encryption can't be set up.")
++        try:
++            audiocrypto.parse_device_public_key(device_raw)
++        except ValueError as e:
++            raise click.ClickException(f"The pendant's key isn't what we expected ({e}). Nothing was changed.")
++
++        # 2. Save the AES key BEFORE the pendant starts using it.
++        old = KEYS_DIR / audiocrypto.AUDIO_KEY_FILE
++        old_device = KEYS_DIR / audiocrypto.DEVICE_FILE
++        if old.exists() and old_device.exists() and old_device.read_bytes() != device_raw:
++            backup = old.with_name(f"audio.key.{time.strftime('%Y%m%d_%H%M%S')}")
++            shutil.copy2(old, backup)
++            click.echo(f"Kept the previous audio key as {backup.name} (for recordings made with it).")
++        audiocrypto.save_audio_key(device_raw)
++        click.echo(f"Saved your audio key: {old}")
++
++        # 3. Send our public key.
++        click.echo("Sending your public key to the pendant...")
++        client.send_command("set_server_public_key", public_key=public_raw)
++        replies["key_request_id"] = client.protocol.message_index  # create_command used index + 1
++
++        def wait_ack():
++            if replies["response"] is not None:
++                client.stop()
++                return False
++            return True
++
++        GLib.timeout_add(250, wait_ack)
++        client.run_with_timeout(6)
++    finally:
++        client.disconnect()
++
++    ack = replies["response"]
++    if ack is None:
++        click.echo("\nThe pendant didn't confirm. Record a few seconds and run 'pendant download' (without --delete-after) to check.")
++    elif not ack["response_success"]:
++        raise click.ClickException(f"The pendant refused the key: {ack.get('response_error')}")
++    else:
++        click.echo("\nThe pendant accepted your key. New recordings will be encrypted for this computer only.")
++    click.echo(f"Back up {KEYS_DIR}: without audio.key, recordings still on the pendant can't be read.")
++
++
++@crypto.command()
++def status():
++    """Show which keys are set up here."""
++    d = KEYS_DIR
++    click.echo(f"Keys folder: {d}")
++    for name, label in [(audiocrypto.PRIVATE_FILE, "Private key"),
++                        (audiocrypto.PUBLIC_FILE, "Public key"),
++                        (audiocrypto.DEVICE_FILE, "Pendant's key"),
++                        (audiocrypto.AUDIO_KEY_FILE, "Audio key")]:
++        click.echo(f"  {label}: {'yes' if (d / name).exists() else 'no'}")
+ 
+-    GLib.timeout_add_seconds(2, lambda: client.stop() or False)
+-    client.run_with_timeout(5)
+-    client.disconnect()
+ 
+-    click.echo("\nPublic key sent to device.")
+-    click.echo("New recordings will be encrypted with this key.")
+-    click.echo("Use 'pendant download' to download and decrypt audio.")
++@crypto.command()
++@click.argument('enc_file', type=click.Path(exists=True))
++@click.option('--key', 'key_file', type=click.Path(exists=True), help='Audio key file (default: your current audio.key).')
++def decrypt(enc_file, key_file):
++    """Decrypt a saved .enc.jsonl into .opus (it keeps the original)."""
++    key = Path(key_file).read_bytes() if key_file else audiocrypto.load_audio_key()
++    if not key or len(key) != 16:
++        raise click.ClickException("No 16-byte audio key found.")
++    out, bad = bytearray(), 0
++    lines = [l for l in Path(enc_file).read_text().splitlines() if l.strip()]
++    for line in lines:
++        r = json.loads(line)
++        pt = audiocrypto.decrypt_chunk(key, bytes.fromhex(r["nonce"]), bytes.fromhex(r["ciphertext"]), bytes.fromhex(r["tag"]))
++        if pt is None:
++            bad += 1
++        else:
++            out.extend(pt)
++    if bad == len(lines):
++        raise click.ClickException("This key doesn't fit any of these chunks.")
++    target = Path(str(enc_file).replace(".enc.jsonl", "") + ".opus")
++    target.write_bytes(out)
++    click.echo(f"Decrypted {len(lines) - bad} of {len(lines)} chunks into {target}")
++    click.echo(f"  Decode: pendant decode {target}")
 diff --git a/src/pendant/commands/device.py b/src/pendant/commands/device.py
 index e05b050..35c65ab 100644
 --- a/src/pendant/commands/device.py
@@ -383,6 +695,141 @@ index 0000000..7477f34
 +    if ctx.obj.get("address"):
 +        env["PENDANT_ADDRESS"] = ctx.obj["address"]
 +    os.execve(str(script), [str(script)], env)
+diff --git a/src/pendant/core/audiocrypto.py b/src/pendant/core/audiocrypto.py
+new file mode 100644
+index 0000000..536d62c
+--- /dev/null
++++ b/src/pendant/core/audiocrypto.py
+@@ -0,0 +1,129 @@
++"""Audio encryption, matching the Limitless app (index.android.bundle, v2.1.6).
++
++The pendant holds its own P-256 key pair and reports the public half in
++DeviceInfoMsg.device_audio_encryption_pub_key. The app makes a second P-256
++key pair (it calls it the "server" key), sends the pendant the raw 65-byte
++public key with SetServerPublicKey, and both sides derive the same AES key:
++
++    shared  = ECDH-P256(our private key, pendant public key)    # 32 bytes
++    aes_key = HKDF-SHA256(shared, salt=b"", info=b"", length=16) # AES-128-GCM
++
++Each audio chunk then arrives as EncryptedBytes {ciphertext, nonce, tag}.
++
++Files, in KEYS_DIR (default ~/.config/pendant/keys):
++    server_private.pem   our P-256 private key (PKCS#8, owner-only)
++    server_public.bin    our raw public key, the bytes sent to the pendant
++    device_public.bin    the pendant's raw public key at the time of setkey
++    audio.key            the derived 16-byte AES key (owner-only)
++
++audio.key alone is enough to decrypt. Losing it means recordings still on the
++pendant can't be read, so back it up.
++"""
++
++from pathlib import Path
++from typing import Optional
++
++from .config import KEYS_DIR
++
++PRIVATE_FILE = "server_private.pem"
++PUBLIC_FILE = "server_public.bin"
++DEVICE_FILE = "device_public.bin"
++AUDIO_KEY_FILE = "audio.key"
++
++
++def _keys_dir(keys_dir: Optional[Path]) -> Path:
++    return Path(keys_dir) if keys_dir else KEYS_DIR
++
++
++def _write_private(path: Path, data: bytes):
++    path.parent.mkdir(parents=True, exist_ok=True)
++    path.touch(mode=0o600, exist_ok=True)
++    path.chmod(0o600)
++    path.write_bytes(data)
++
++
++def generate_keypair(keys_dir: Optional[Path] = None, force: bool = False) -> bytes:
++    """Make our P-256 key pair. Returns the raw public key. Won't overwrite unless forced."""
++    from cryptography.hazmat.primitives import serialization
++    from cryptography.hazmat.primitives.asymmetric import ec
++
++    d = _keys_dir(keys_dir)
++    private_path = d / PRIVATE_FILE
++    if private_path.exists() and not force:
++        raise FileExistsError(str(private_path))
++
++    key = ec.generate_private_key(ec.SECP256R1())
++    pem = key.private_bytes(
++        serialization.Encoding.PEM,
++        serialization.PrivateFormat.PKCS8,
++        serialization.NoEncryption(),
++    )
++    public_raw = key.public_key().public_bytes(
++        serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint
++    )
++    _write_private(private_path, pem)
++    (d / PUBLIC_FILE).write_bytes(public_raw)
++    return public_raw
++
++
++def load_public_raw(keys_dir: Optional[Path] = None) -> Optional[bytes]:
++    p = _keys_dir(keys_dir) / PUBLIC_FILE
++    return p.read_bytes() if p.exists() else None
++
++
++def parse_device_public_key(raw: bytes):
++    """Validate the pendant's public key; raises ValueError if it isn't a P-256 point."""
++    from cryptography.hazmat.primitives.asymmetric import ec
++
++    if len(raw) != 65 or raw[0] != 0x04:
++        raise ValueError(f"expected a 65-byte uncompressed P-256 key, got {len(raw)} bytes")
++    return ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), raw)
++
++
++def derive_audio_key(private_key, device_public_raw: bytes) -> bytes:
++    """ECDH-P256 then HKDF-SHA256 (empty salt and info) to a 16-byte AES key."""
++    from cryptography.hazmat.primitives import hashes
++    from cryptography.hazmat.primitives.asymmetric import ec
++    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
++
++    shared = private_key.exchange(ec.ECDH(), parse_device_public_key(device_public_raw))
++    return HKDF(algorithm=hashes.SHA256(), length=16, salt=b"", info=b"").derive(shared)
++
++
++def save_audio_key(device_public_raw: bytes, keys_dir: Optional[Path] = None) -> bytes:
++    """Derive the AES key for this pendant from our saved private key, and save it."""
++    from cryptography.hazmat.primitives import serialization
++
++    d = _keys_dir(keys_dir)
++    private_key = serialization.load_pem_private_key((d / PRIVATE_FILE).read_bytes(), password=None)
++    key = derive_audio_key(private_key, device_public_raw)
++    (d / DEVICE_FILE).write_bytes(device_public_raw)
++    _write_private(d / AUDIO_KEY_FILE, key)
++    return key
++
++
++def load_audio_key(keys_dir: Optional[Path] = None) -> Optional[bytes]:
++    p = _keys_dir(keys_dir) / AUDIO_KEY_FILE
++    if not p.exists():
++        return None
++    key = p.read_bytes()
++    return key if len(key) == 16 else None
++
++
++def decrypt_chunk(key: bytes, nonce: bytes, ciphertext: bytes, tag: bytes) -> Optional[bytes]:
++    """AES-128-GCM. Returns None if the tag doesn't verify (wrong key or damaged data)."""
++    from cryptography.exceptions import InvalidTag
++    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
++
++    try:
++        return AESGCM(key).decrypt(nonce, ciphertext + tag, None)
++    except (InvalidTag, ValueError):
++        return None
++
++
++def encrypt_chunk(key: bytes, nonce: bytes, plaintext: bytes) -> tuple:
++    """The pendant's side, for tests: returns (ciphertext, tag)."""
++    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
++
++    out = AESGCM(key).encrypt(nonce, plaintext, None)
++    return out[:-16], out[-16:]
 diff --git a/src/pendant/core/bleak_client.py b/src/pendant/core/bleak_client.py
 index 5278f23..ca072c2 100644
 --- a/src/pendant/core/bleak_client.py
@@ -417,7 +864,7 @@ index 5278f23..ca072c2 100644
          elif rtype == "battery_status":
              print(f"\n  Battery: {response.get('level', 0)}%")
 diff --git a/src/pendant/core/dbus_client.py b/src/pendant/core/dbus_client.py
-index a5867ef..71435c9 100644
+index a5867ef..222bebd 100644
 --- a/src/pendant/core/dbus_client.py
 +++ b/src/pendant/core/dbus_client.py
 @@ -1,10 +1,11 @@
@@ -468,7 +915,7 @@ index a5867ef..71435c9 100644
                  self._status_printed = True
  
          elif rtype == "battery_status":
-@@ -99,6 +101,10 @@ class DBusClient:
+@@ -99,11 +101,18 @@ class DBusClient:
  
          elif rtype == "storage_buffer":
              self.page_count += 1
@@ -479,7 +926,15 @@ index a5867ef..71435c9 100644
              flash_page = response.get("flash_page", b"")
              if flash_page:
                  if DEBUG_MODE:
-@@ -114,7 +120,10 @@ class DBusClient:
+                     print(f"\n  Page {self.page_count}: flash_page={len(flash_page)}B")
++                before = len(self.protocol.undecrypted)
+                 opus, pcm, encrypted, _, page_info = self.protocol.extract_audio_from_flash_page(flash_page, self.private_key)
++                for rec in self.protocol.undecrypted[before:]:
++                    rec["page_index"] = response.get("index", 0)
+                 # Track audio offset for this page
+                 page_info["audio_offset_bytes"] = len(self.opus_data)
+                 self.page_timestamps.append(page_info)
+@@ -114,7 +123,10 @@ class DBusClient:
                  enc_str = f" enc={len(self.encrypted_data)}B" if self.encrypted_data else ""
                  print(f"\r  Page {self.page_count}: opus={len(self.opus_data)}B pcm={len(self.pcm_data)}B{enc_str}", end="", flush=True)
  
@@ -492,10 +947,10 @@ index a5867ef..71435c9 100644
  
          if self.on_response:
 diff --git a/src/pendant/core/protocol.py b/src/pendant/core/protocol.py
-index c342f7e..459af84 100644
+index c342f7e..9445d62 100644
 --- a/src/pendant/core/protocol.py
 +++ b/src/pendant/core/protocol.py
-@@ -10,6 +10,36 @@ from .config import KEYS_DIR
+@@ -10,12 +10,43 @@ from .config import KEYS_DIR
  DEBUG_MODE = False
  
  
@@ -532,7 +987,14 @@ index c342f7e..459af84 100644
  class PendantProtocol:
      """Implements the Pendant BLE protocol (protobuf encoding/decoding)."""
  
-@@ -82,6 +112,11 @@ class PendantProtocol:
+     def __init__(self):
+         self.message_index = 0
+         self.pending_fragments: dict[int, list[bytes]] = {}
++        self.undecrypted: list[dict] = []  # encrypted chunks we couldn't decrypt, kept whole
+ 
+     def create_ble_message(self, payload: bytes) -> bytes:
+         """Wrap a payload in BLE message envelope."""
+@@ -82,6 +113,11 @@ class PendantProtocol:
              dl.real_time_mode_enabled = kwargs.get("realtime", False)
              cmd.download_flash_pages.CopyFrom(dl)
  
@@ -544,7 +1006,7 @@ index c342f7e..459af84 100644
          elif cmd_type == "set_current_time":
              sct = pb.SetCurrentTime()
              sct.timestamp_ms = kwargs.get("timestamp_ms", int(datetime.now().timestamp() * 1000))
-@@ -166,39 +201,21 @@ class PendantProtocol:
+@@ -166,39 +202,22 @@ class PendantProtocol:
              if content_type == "device_info":
                  info = msg.device_info
                  result.update({
@@ -560,6 +1022,7 @@ index c342f7e..459af84 100644
 +                    "factory_reset_id": info.factory_reset_id,
 +                    "ble_mac_address": ":".join(f"{b:02X}" for b in reversed(info.ble_mac_address)),  # sent little-endian
 +                    "has_device_public_key": bool(info.device_audio_encryption_pub_key),
++                    "device_public_key": bytes(info.device_audio_encryption_pub_key),
                  })
 +                if info.HasField("device_status"):
 +                    result["status"] = _status_dict(info.device_status)
@@ -595,7 +1058,7 @@ index c342f7e..459af84 100644
  
              elif content_type == "storage_buffer":
                  buf = msg.storage_buffer
-@@ -232,8 +249,14 @@ class PendantProtocol:
+@@ -232,14 +251,23 @@ class PendantProtocol:
                  })
  
              elif content_type == "button_status":
@@ -611,10 +1074,94 @@ index c342f7e..459af84 100644
                  })
  
              # Extract response_data if present
-@@ -381,6 +404,58 @@ class PendantProtocol:
+             if msg.HasField("response_data"):
+                 result["request_id"] = msg.response_data.request_id
+-                result["response_success"] = msg.response_data.success
++                has_error = msg.response_data.HasField("error")
++                result["response_success"] = not has_error
++                if has_error:
++                    result["response_error"] = msg.response_data.error.error_message or f"category {msg.response_data.error.category}"
+ 
+             return result
+ 
+@@ -339,15 +367,17 @@ class PendantProtocol:
+                         if DEBUG_MODE:
+                             print(f"        encrypted: ciphertext={len(enc.ciphertext)}B, nonce={len(enc.nonce)}B, tag={len(enc.tag)}B")
+ 
+-                        if private_key and enc.ciphertext:
+-                            # Try to decrypt
+-                            decrypted = self._decrypt_audio(enc, private_key)
+-                            if decrypted:
+-                                opus_data.extend(decrypted)
+-                            else:
+-                                encrypted_data.extend(enc.ciphertext)
+-                        else:
++                        decrypted = self._decrypt_audio(enc, private_key) if (private_key and enc.ciphertext) else None
++                        if decrypted is not None:
++                            opus_data.extend(decrypted)
++                        elif enc.ciphertext:
++                            # Keep the whole record so it can be decrypted later.
+                             encrypted_data.extend(enc.ciphertext)
++                            self.undecrypted.append({
++                                "nonce": bytes(enc.nonce).hex(),
++                                "ciphertext": bytes(enc.ciphertext).hex(),
++                                "tag": bytes(enc.tag).hex(),
++                            })
+ 
+                     if DEBUG_MODE and audio.codec_type:
+                         print(f"        codec_type: {audio.codec_type}, num_frames: {audio.num_frames}")
+@@ -359,62 +389,70 @@ class PendantProtocol:
+ 
+         return bytes(opus_data), bytes(pcm_data), bytes(encrypted_data), codec_type, page_info
+ 
+-    def _decrypt_audio(self, encrypted, private_key) -> Optional[bytes]:
+-        """Decrypt encrypted audio data using our private key."""
++    def _decrypt_audio(self, encrypted, key) -> Optional[bytes]:
++        """AES-128-GCM with the key from 'pendant crypto setkey'. None if it doesn't verify."""
+         try:
+-            from nacl.public import SealedBox
+-
+-            # The encryption likely uses crypto_box_seal (anonymous sender)
+-            # or crypto_box (authenticated sender)
+-            box = SealedBox(private_key)
+-            # Combine nonce + ciphertext + tag for NaCl format
+-            # Different crypto libs have different formats
+-            combined = encrypted.nonce + encrypted.ciphertext + encrypted.tag
+-            try:
+-                return box.decrypt(combined)
+-            except Exception:
+-                # Try without combining
+-                return box.decrypt(encrypted.ciphertext)
++            from .audiocrypto import decrypt_chunk
++            return decrypt_chunk(key, bytes(encrypted.nonce), bytes(encrypted.ciphertext), bytes(encrypted.tag))
+         except Exception as e:
+             if DEBUG_MODE:
+                 print(f"        Decryption failed: {e}")
              return None
  
  
+-def load_private_key():
+-    """Load private key from keys directory if it exists."""
+-    key_file = KEYS_DIR / "private.key"
+-    if key_file.exists():
+-        try:
+-            from nacl.public import PrivateKey
+-            key_bytes = key_file.read_bytes()
+-            return PrivateKey(key_bytes)
+-        except Exception as e:
+-            print(f"Warning: Failed to load private key: {e}")
+-    return None
+-
+-
+-def generate_keypair():
+-    """Generate a new X25519 keypair for encryption."""
+-    try:
+-        from nacl.public import PrivateKey
+-    except ImportError:
+-        print("Error: pynacl not installed. Run: pip install pynacl")
+-        return None, None
+-
+-    KEYS_DIR.mkdir(parents=True, exist_ok=True)
 +def format_status_lines(st: dict) -> list:
 +    """Human-readable lines for a flattened DeviceStatus."""
 +    lines = []
@@ -665,11 +1212,25 @@ index c342f7e..459af84 100644
 +            break
 +        end = i
 +    return end
-+
-+
- def load_private_key():
-     """Load private key from keys directory if it exists."""
-     key_file = KEYS_DIR / "private.key"
+ 
+-    private_key = PrivateKey.generate()
+-    public_key = private_key.public_key
+ 
+-    # Save keys
+-    private_file = KEYS_DIR / "private.key"
+-    public_file = KEYS_DIR / "public.key"
+-
+-    private_file.write_bytes(bytes(private_key))
+-    public_file.write_bytes(bytes(public_key))
+-
+-    # Make private key readable only by owner
+-    private_file.chmod(0o600)
+-
+-    return private_file, public_file
++def load_private_key():
++    """The AES key saved by 'pendant crypto setkey', or None. (Kept under the old name.)"""
++    from .audiocrypto import load_audio_key
++    return load_audio_key()
 diff --git a/tests/conftest.py b/tests/conftest.py
 index cdd3ff3..3b84f90 100644
 --- a/tests/conftest.py
@@ -693,6 +1254,165 @@ index cdd3ff3..3b84f90 100644
      
      status = pb.DeviceStatus()
      status.storage_state.CopyFrom(storage)
+diff --git a/tests/test_audiocrypto.py b/tests/test_audiocrypto.py
+new file mode 100644
+index 0000000..45a21e6
+--- /dev/null
++++ b/tests/test_audiocrypto.py
+@@ -0,0 +1,153 @@
++"""Audio encryption: the Limitless app's scheme, and never freeing what we can't read."""
++
++import json
++import os
++
++import pytest
++from click.testing import CliRunner
++from cryptography.hazmat.primitives import hashes, serialization
++from cryptography.hazmat.primitives.asymmetric import ec
++from cryptography.hazmat.primitives.kdf.hkdf import HKDF
++
++from pendant.core import audiocrypto
++from pendant.core.protocol import PendantProtocol, pb
++from pendant.commands.audio import _save_and_free
++from pendant.commands.crypto import decrypt
++
++from test_sync_safety import FakeClient
++
++
++def _raw(pub):
++    return pub.public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
++
++
++@pytest.fixture
++def pendant_and_keys(tmp_path):
++    """A fake pendant key pair, plus our key pair and audio key in tmp_path."""
++    device = ec.generate_private_key(ec.SECP256R1())
++    ours_raw = audiocrypto.generate_keypair(keys_dir=tmp_path)
++    key = audiocrypto.save_audio_key(_raw(device.public_key()), keys_dir=tmp_path)
++    return device, ours_raw, key
++
++
++def _pendant_side_key(device, ours_raw):
++    """What the pendant computes from our public key."""
++    ours = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), ours_raw)
++    shared = device.exchange(ec.ECDH(), ours)
++    return HKDF(algorithm=hashes.SHA256(), length=16, salt=None, info=b"").derive(shared)
++
++
++def test_both_sides_derive_the_same_key(pendant_and_keys):
++    device, ours_raw, key = pendant_and_keys
++    assert len(ours_raw) == 65 and ours_raw[0] == 0x04
++    assert len(key) == 16
++    # salt=None (RFC 5869 zeros) must equal the app's empty salt
++    assert _pendant_side_key(device, ours_raw) == key
++
++
++def test_key_files_are_private(tmp_path, pendant_and_keys):
++    for name in (audiocrypto.PRIVATE_FILE, audiocrypto.AUDIO_KEY_FILE):
++        assert oct((tmp_path / name).stat().st_mode & 0o777) == "0o600"
++    assert audiocrypto.load_audio_key(keys_dir=tmp_path) == pendant_and_keys[2]
++
++
++def test_keygen_wont_overwrite(tmp_path, pendant_and_keys):
++    with pytest.raises(FileExistsError):
++        audiocrypto.generate_keypair(keys_dir=tmp_path)
++
++
++def test_rejects_wrong_kind_of_device_key():
++    with pytest.raises(ValueError):
++        audiocrypto.parse_device_public_key(os.urandom(32))  # an X25519-sized key
++    with pytest.raises(ValueError):
++        audiocrypto.parse_device_public_key(b"\x04" + b"\x00" * 64)  # not on the curve
++
++
++def _page(key, chunks):
++    page = pb.FlashPage(absolute_timestamp_ms=1760118000000)
++    for plaintext in chunks:
++        nonce = os.urandom(12)
++        ct, tag = audiocrypto.encrypt_chunk(key, nonce, plaintext)
++        c = page.chunks.add()
++        c.audio_data.encrypted_codec_beamforming_data.ciphertext = ct
++        c.audio_data.encrypted_codec_beamforming_data.nonce = nonce
++        c.audio_data.encrypted_codec_beamforming_data.tag = tag
++    return page.SerializeToString()
++
++
++def test_decrypts_pendant_audio(pendant_and_keys):
++    _, _, key = pendant_and_keys
++    proto = PendantProtocol()
++    opus, _, enc, _, _ = proto.extract_audio_from_flash_page(_page(key, [b"hello ", b"world"]), key)
++    assert opus == b"hello world"
++    assert enc == b"" and proto.undecrypted == []
++
++
++def test_wrong_key_keeps_chunks_whole(pendant_and_keys):
++    _, _, key = pendant_and_keys
++    proto = PendantProtocol()
++    opus, _, enc, _, _ = proto.extract_audio_from_flash_page(_page(key, [b"secret"]), os.urandom(16))
++    assert opus == b""
++    assert len(proto.undecrypted) == 1
++    rec = proto.undecrypted[0]
++    assert set(rec) >= {"nonce", "ciphertext", "tag"}
++
++
++def test_no_key_keeps_chunks_whole(pendant_and_keys):
++    _, _, key = pendant_and_keys
++    proto = PendantProtocol()
++    proto.extract_audio_from_flash_page(_page(key, [b"a", b"b"]), None)
++    assert len(proto.undecrypted) == 2
++
++
++def test_undecryptable_audio_is_never_freed(tmp_path, pendant_and_keys):
++    _, _, key = pendant_and_keys
++    c = FakeClient([100, 101, 102], opus=b"")
++    c.protocol = PendantProtocol()
++    c.protocol.extract_audio_from_flash_page(_page(key, [b"x" * 40]), None)
++    c.encrypted_data = bytearray(b"x")
++    c.private_key = None
++    _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=True)
++    assert c.sent == []  # nothing deleted
++    saved = list(tmp_path.glob("*.enc.jsonl"))
++    assert len(saved) == 1
++
++
++def test_saved_chunks_decrypt_later(tmp_path, pendant_and_keys, monkeypatch):
++    _, _, key = pendant_and_keys
++    proto = PendantProtocol()
++    proto.extract_audio_from_flash_page(_page(key, [b"first ", b"second"]), None)
++    enc = tmp_path / "pendant_20261010_120000.enc.jsonl"
++    enc.write_text("".join(json.dumps(r) + "\n" for r in proto.undecrypted))
++    result = CliRunner().invoke(decrypt, [str(enc), "--key", str(tmp_path / audiocrypto.AUDIO_KEY_FILE)])
++    assert result.exit_code == 0, result.output
++    assert (tmp_path / "pendant_20261010_120000.opus").read_bytes() == b"first second"
++
++
++def test_set_key_command_sends_raw_public_key(pendant_and_keys):
++    _, ours_raw, _ = pendant_and_keys
++    proto = PendantProtocol()
++    env = pb.BLEMessageFromNativeToPendant()
++    env.ParseFromString(proto.create_command("set_server_public_key", public_key=ours_raw))
++    cmd = pb.ServerCommandMsg()
++    cmd.ParseFromString(env.payload)
++    assert cmd.WhichOneof("content") == "set_audio_encryption_server_public_key"
++    assert cmd.set_audio_encryption_server_public_key.public_key == ours_raw
++    assert cmd.request_data.request_id == proto.message_index
++
++
++def _reply(error=None):
++    msg = pb.PendantAllMsg()
++    msg.response_data.request_id = 7
++    if error:
++        msg.response_data.error.category = 2
++        msg.response_data.error.error_message = error
++    return msg.SerializeToString()
++
++
++def test_reply_success_and_error():
++    proto = PendantProtocol()
++    ok = proto.parse_response(_reply())
++    assert ok["request_id"] == 7 and ok["response_success"] is True
++    bad = proto.parse_response(_reply("bad key"))
++    assert bad["response_success"] is False and bad["response_error"] == "bad key"
 diff --git a/tests/test_protocol.py b/tests/test_protocol.py
 index ad39d00..822bfc5 100644
 --- a/tests/test_protocol.py

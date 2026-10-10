@@ -32,6 +32,13 @@ curl -fsSL "$BASE/pendant-cli-fixes.patch" | git apply
 protoc -I proto --python_out=proto proto/pendant.proto
 cd "$HOME"
 
+# Encryption needs the cryptography library in the same Python that runs pendant.
+read -r -a PENDANT_PY < <(head -1 "$(readlink -f "$PENDANT_BIN")" | sed 's/^#!//')
+if ! "${PENDANT_PY[@]}" -c "import cryptography" 2>/dev/null; then
+  say "Installing the cryptography library"
+  "${PENDANT_PY[@]}" -m pip install -q cryptography || sudo apt-get install -y python3-cryptography
+fi
+
 say "Installing pendant sync"
 mkdir -p "$HOME/.local/share/pendant" "$HOME/.config/pendant" "$HOME/.config/systemd/user" "$HOME/recordings"
 curl -fsSL "$BASE/pendant-sync" -o "$HOME/.local/share/pendant/pendant-sync"
