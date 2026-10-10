@@ -180,7 +180,7 @@ Check it's scheduled: `systemctl --user list-timers` shows **pendant-sync.timer*
 **How freeing works, exactly.** After a download, the sync asks the pendant to delete pages only when all of these hold:
 
 - the saved files exist on disk and aren't empty;
-- the download started at the pendant's own oldest stored page (it asks the pendant which that is; if the two don't match, nothing is deleted);
+- the download started at the pendant's own oldest stored page, and covers at least as many pages as the pendant said it held (it asks the pendant first; if either check fails, nothing is deleted, and the next sync downloads those pages again and replaces the earlier copy);
 - it deletes only through the end of an unbroken run of pages: if a page went missing in the middle, everything from the gap on stays on the pendant;
 - it stops before any page the pendant flagged as unreadable, or that couldn't be parsed, so that page gets another try next time;
 - nothing is deleted if any audio couldn't be decrypted (those chunks are saved whole in a `.enc.jsonl` file).
@@ -412,7 +412,7 @@ That leaves your recordings (`~/recordings`) and keys (`~/.config/pendant`) alon
 
 ## What the pendant-cli patch changes
 
-`pendant-cli-fixes.patch` fixes how [pendant-cli](https://github.com/sdelcore/pendant-cli) reads the pendant and adds what this guide uses. Message layouts come from the Limitless Android app. It applies cleanly to upstream commit `1c71659` and passes pendant-cli's tests (99, including 17 for the page-freeing logic and 14 for encryption). The installer in step 6 applies it; it resets pendant-cli to its original files first (removing files an earlier version of the patch added), and only updates its own two lines in `~/.config/pendant/env`, so it's safe to rerun. Your own changes to pendant-cli's files, if any, would be lost.
+`pendant-cli-fixes.patch` fixes how [pendant-cli](https://github.com/sdelcore/pendant-cli) reads the pendant and adds what this guide uses. Message layouts come from the Limitless Android app. It applies cleanly to upstream commit `1c71659` and passes pendant-cli's tests (102, including 20 for the page-freeing logic and 14 for encryption). The installer in step 6 applies it; it resets pendant-cli to its original files first (removing files an earlier version of the patch added), and only updates its own two lines in `~/.config/pendant/env`, so it's safe to rerun. Your own changes to pendant-cli's files, if any, would be lost.
 
 **Reading the pendant correctly**
 - **Recording status** shows the real state: not recording, recording, or listening (armed to record when it hears speech), which pendant-cli used to print as `False`.

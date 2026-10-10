@@ -286,7 +286,7 @@ index fb98890..4c861ff 100644
  # Register command groups
  cli.add_command(bluetooth.bt)
 diff --git a/src/pendant/commands/audio.py b/src/pendant/commands/audio.py
-index cf0b2e6..33a2b46 100644
+index cf0b2e6..81d6ff3 100644
 --- a/src/pendant/commands/audio.py
 +++ b/src/pendant/commands/audio.py
 @@ -1,6 +1,7 @@
@@ -416,7 +416,7 @@ index cf0b2e6..33a2b46 100644
          # Check if timestamps are real (synced) or just device uptime
          first_ts = client.page_timestamps[0].get("absolute_timestamp_ms", 0) if client.page_timestamps else 0
          timestamps_synced = first_ts > MIN_VALID_TIMESTAMP_MS
-@@ -103,19 +146,57 @@ def download(ctx, decode, output):
+@@ -103,19 +146,66 @@ def download(ctx, decode, output):
              "timestamps_synced": timestamps_synced,
              "total_pages": client.page_count,
              "total_audio_bytes": len(client.opus_data),
@@ -439,17 +439,26 @@ index cf0b2e6..33a2b46 100644
 +        click.echo("Some audio couldn't be decrypted, so nothing will be deleted from the pendant. "
 +                   "It's all still there, and saved here too.")
 +    elif delete_after:
-+        oldest = (getattr(client, "device_info", None) or {}).get("oldest_flash_page")
++        oldest, held = pendant_page_range(client)
 +        bad = getattr(client, "bad_page_indices", [])
++        first = min(client.page_indices) if client.page_indices else None
++        if first is not None:
++            click.echo(f"  Pendant reports oldest page {oldest if oldest is not None else 'unknown'}, "
++                       f"{held if held is not None else 'unknown'} pages held; download starts at {first}.")
 +        through = safe_delete_index(client.page_indices, bad, oldest)
-+        if through is None:
-+            if client.page_indices and oldest is not None and min(client.page_indices) != oldest:
-+                click.echo(f"The pendant's oldest page is {oldest} but the download started at "
-+                           f"{min(client.page_indices)}, so nothing will be deleted. Everything stays on the pendant.")
-+            elif client.page_indices and bad:
-+                click.echo(f"The first page ({min(client.page_indices)}) was unreadable, so nothing will be deleted.")
-+            else:
-+                click.echo("Nothing downloaded, so nothing to delete.")
++        refusal = None
++        if first is None:
++            refusal = "Nothing downloaded, so nothing to delete."
++        elif oldest is not None and first != oldest:
++            refusal = (f"The pendant's oldest page is {oldest} but the download started at {first}, "
++                       "so nothing will be deleted. Everything stays on the pendant.")
++        elif through is None:
++            refusal = f"The first page ({first}) was unreadable, so nothing will be deleted."
++        elif held and (through - first + 1) < held:
++            refusal = (f"The pendant held {held} pages but the unbroken download covers {through - first + 1}, "
++                       "so nothing will be deleted. Everything stays on the pendant.")
++        if refusal:
++            click.echo(refusal)
 +        else:
 +            if through < max(client.page_indices):
 +                why = "unreadable" if (through + 1) in bad else "missing"
@@ -476,10 +485,27 @@ index cf0b2e6..33a2b46 100644
          except Exception as e:
              click.echo(f"Decode failed: {e}")
              click.echo(f"  Manual: pendant decode {opus_fname}")
-@@ -123,6 +204,48 @@ def download(ctx, decode, output):
+@@ -123,6 +213,65 @@ def download(ctx, decode, output):
          click.echo(f"  Decode: pendant decode {opus_fname}")
  
  
++def pendant_page_range(client):
++    """(oldest page index the pendant reports, or None; pages it held before the download, or None).
++
++    The pendant leaves fields at 0 when it doesn't report them, so an oldest page of 0 counts
++    only when a newest page is reported too. Storage status is checked first, then device info.
++    """
++    oldest = None
++    for src in ((getattr(client, "first_status", None) or {}),
++                (getattr(client, "last_status", None) or {}),
++                (getattr(client, "device_info", None) or {})):
++        if src.get("newest_flash_page"):
++            oldest = src.get("oldest_flash_page")
++            break
++    held = (getattr(client, "first_status", None) or {}).get("storage_used_pages")
++    return oldest, held
++
++
 +def write_health(client, output_dir, address=None):
 +    """A small status file so a morning note can say when the pendant was last seen.
 +
@@ -1074,7 +1100,7 @@ index 5278f23..ca072c2 100644
          elif rtype == "battery_status":
              print(f"\n  Battery: {response.get('level', 0)}%")
 diff --git a/src/pendant/core/dbus_client.py b/src/pendant/core/dbus_client.py
-index a5867ef..23afd3a 100644
+index a5867ef..2ff11d5 100644
 --- a/src/pendant/core/dbus_client.py
 +++ b/src/pendant/core/dbus_client.py
 @@ -1,10 +1,11 @@
@@ -1090,11 +1116,12 @@ index a5867ef..23afd3a 100644
  from .bluetooth import ensure_connected
  
  
-@@ -27,11 +28,18 @@ class DBusClient:
+@@ -27,11 +28,19 @@ class DBusClient:
          self.opus_data = bytearray()
          self.pcm_data = bytearray()
          self.encrypted_data = bytearray()
 +        self.last_status = None   # most recent device_status, for the health file
++        self.first_status = None  # first device_status of the session
 +        self.last_battery = None  # most recent battery_status
          self.page_count = 0
          self.responses = []
@@ -1109,7 +1136,7 @@ index a5867ef..23afd3a 100644
  
      def _init_dbus(self):
          """Initialize D-Bus connection."""
-@@ -74,22 +82,23 @@ class DBusClient:
+@@ -74,22 +83,25 @@ class DBusClient:
          self.responses.append(rtype)
  
          if rtype == "device_info":
@@ -1126,6 +1153,8 @@ index a5867ef..23afd3a 100644
  
          elif rtype == "device_status":
 +            self.last_status = response
++            if self.first_status is None:
++                self.first_status = response  # storage as it was before the download
              if not self._status_printed:
 -                is_recording = response.get('is_recording', False)
 -                print(f"\n  Recording: {is_recording}")
@@ -1141,7 +1170,7 @@ index a5867ef..23afd3a 100644
              print(f"\n  Battery: {response.get('level', 0)}%")
              if response.get('charging'):
                  print(f"  Charging: yes")
-@@ -99,11 +108,22 @@ class DBusClient:
+@@ -99,11 +111,22 @@ class DBusClient:
  
          elif rtype == "storage_buffer":
              self.page_count += 1
@@ -1164,7 +1193,7 @@ index a5867ef..23afd3a 100644
                  # Track audio offset for this page
                  page_info["audio_offset_bytes"] = len(self.opus_data)
                  self.page_timestamps.append(page_info)
-@@ -114,7 +134,10 @@ class DBusClient:
+@@ -114,7 +137,10 @@ class DBusClient:
                  enc_str = f" enc={len(self.encrypted_data)}B" if self.encrypted_data else ""
                  print(f"\r  Page {self.page_count}: opus={len(self.opus_data)}B pcm={len(self.pcm_data)}B{enc_str}", end="", flush=True)
  
@@ -1216,10 +1245,10 @@ index 0a797ea..16d9f6b 100644
              offset += frame_size
              frame_count += 1
 diff --git a/src/pendant/core/protocol.py b/src/pendant/core/protocol.py
-index c342f7e..ce980c8 100644
+index c342f7e..3317c51 100644
 --- a/src/pendant/core/protocol.py
 +++ b/src/pendant/core/protocol.py
-@@ -10,12 +10,44 @@ from .config import KEYS_DIR
+@@ -10,12 +10,46 @@ from .config import KEYS_DIR
  DEBUG_MODE = False
  
  
@@ -1242,6 +1271,8 @@ index c342f7e..ce980c8 100644
 +    if status.HasField("storage_state"):
 +        total = status.storage_state.total_capture_pages
 +        free = status.storage_state.free_capture_pages
++        out["oldest_flash_page"] = status.storage_state.oldest_flash_page
++        out["newest_flash_page"] = status.storage_state.newest_flash_page
 +        if total > 0:
 +            used = max(total - free, 0)
 +            out["storage_used_pages"] = used
@@ -1264,7 +1295,7 @@ index c342f7e..ce980c8 100644
  
      def create_ble_message(self, payload: bytes) -> bytes:
          """Wrap a payload in BLE message envelope."""
-@@ -82,6 +114,11 @@ class PendantProtocol:
+@@ -82,6 +116,11 @@ class PendantProtocol:
              dl.real_time_mode_enabled = kwargs.get("realtime", False)
              cmd.download_flash_pages.CopyFrom(dl)
  
@@ -1276,7 +1307,7 @@ index c342f7e..ce980c8 100644
          elif cmd_type == "set_current_time":
              sct = pb.SetCurrentTime()
              sct.timestamp_ms = kwargs.get("timestamp_ms", int(datetime.now().timestamp() * 1000))
-@@ -111,12 +148,14 @@ class PendantProtocol:
+@@ -111,12 +150,14 @@ class PendantProtocol:
  
          elif cmd_type == "set_led":
              led_msg = pb.SetLed()
@@ -1293,7 +1324,7 @@ index c342f7e..ce980c8 100644
              cmd.set_led_brightness.CopyFrom(brightness_msg)
  
          elif cmd_type == "set_vad_threshold":
-@@ -166,39 +205,22 @@ class PendantProtocol:
+@@ -166,39 +207,22 @@ class PendantProtocol:
              if content_type == "device_info":
                  info = msg.device_info
                  result.update({
@@ -1345,7 +1376,7 @@ index c342f7e..ce980c8 100644
  
              elif content_type == "storage_buffer":
                  buf = msg.storage_buffer
-@@ -232,14 +254,23 @@ class PendantProtocol:
+@@ -232,14 +256,23 @@ class PendantProtocol:
                  })
  
              elif content_type == "button_status":
@@ -1371,7 +1402,7 @@ index c342f7e..ce980c8 100644
  
              return result
  
-@@ -279,6 +310,17 @@ class PendantProtocol:
+@@ -279,6 +312,17 @@ class PendantProtocol:
                  print(f"\n    FlashPage: ts={page.absolute_timestamp_ms}, uptime={page.boot_uptime_ms}, chunks={len(page.chunks)}")
  
              for i, chunk in enumerate(page.chunks):
@@ -1389,7 +1420,7 @@ index c342f7e..ce980c8 100644
                  # Chunk is not a oneof - check if audio_data field is populated
                  has_audio = chunk.HasField('audio_data') if hasattr(chunk, 'HasField') else bool(chunk.audio_data.ByteSize())
  
-@@ -339,82 +381,127 @@ class PendantProtocol:
+@@ -339,82 +383,127 @@ class PendantProtocol:
                          if DEBUG_MODE:
                              print(f"        encrypted: ciphertext={len(enc.ciphertext)}B, nonce={len(enc.nonce)}B, tag={len(enc.tag)}B")
  
@@ -2003,10 +2034,10 @@ index 0000000..0943e9e
 +    assert result.exit_code != 0 and "install-transcribe.sh" in result.output
 diff --git a/tests/test_sync_safety.py b/tests/test_sync_safety.py
 new file mode 100644
-index 0000000..df1c6db
+index 0000000..646714d
 --- /dev/null
 +++ b/tests/test_sync_safety.py
-@@ -0,0 +1,160 @@
+@@ -0,0 +1,186 @@
 +"""Safety tests for freeing pages on the pendant after a download."""
 +import click
 +import pytest
@@ -2049,7 +2080,9 @@ index 0000000..df1c6db
 +        self.page_indices = list(indices)
 +        self.page_errors = len(bad)
 +        self.bad_page_indices = list(bad)
-+        self.device_info = {"oldest_flash_page": oldest} if oldest is not None else None
++        self.device_info = {"oldest_flash_page": oldest, "newest_flash_page": 99999} if oldest is not None else None
++        self.first_status = None
++        self.last_status = None
 +        self.opus_data = bytearray(opus)
 +        self.pcm_data = bytearray()
 +        self.encrypted_data = bytearray()
@@ -2167,3 +2200,27 @@ index 0000000..df1c6db
 +    assert safe_delete_index([5, 6, 7], bad_indices=[6]) == 5
 +    assert safe_delete_index([5, 6, 7], bad_indices=[5]) is None
 +    assert safe_delete_index([5, 6, 8, 9], bad_indices=[9]) == 6
++
++
++def test_real_pendant_reports_blank_oldest_page(tmp_path):
++    """What the pendant actually sent on Oct 10: device info oldest=0/newest=0 (not reported),
++    156 pages held, download 5162-5326 (165 pages, some recorded during the download)."""
++    c = FakeClient(range(5162, 5327))
++    c.device_info = {"oldest_flash_page": 0, "newest_flash_page": 0}
++    c.first_status = {"storage_used_pages": 156, "oldest_flash_page": 0, "newest_flash_page": 0}
++    _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=True)
++    assert c.sent == [("delete_flash_page", {"index": 5326})]
++
++
++def test_oldest_page_from_storage_status(tmp_path):
++    c = FakeClient(range(5170, 5200))
++    c.first_status = {"storage_used_pages": 20, "oldest_flash_page": 5162, "newest_flash_page": 5190}
++    _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=True)
++    assert c.sent == []  # pendant says it starts at 5162; we started at 5170
++
++
++def test_too_few_pages_for_what_the_pendant_held(tmp_path):
++    c = FakeClient(range(5162, 5200))  # 38 pages
++    c.first_status = {"storage_used_pages": 156}
++    _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=True)
++    assert c.sent == []

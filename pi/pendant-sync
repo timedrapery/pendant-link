@@ -56,7 +56,16 @@ file_incoming() {
       *) day="undated" ;;
     esac
     mkdir -p "$ARCHIVE/$day"
-    mv -n "$f" "$ARCHIVE/$day/"
+    target="$ARCHIVE/$day/$(basename "$f")"
+    if [ -e "$target" ]; then
+      # Same start time: pages that weren't freed last time were downloaded again, with
+      # anything newer. The new copy holds everything the old one did, so it replaces it,
+      # and the transcript is redone.
+      base="${target%.*}"
+      rm -f "$base.txt" "$base.words.json"
+      case "$target" in *.opus) log "Replacing $(basename "$base") with a newer, longer download of the same recording" ;; esac
+    fi
+    mv -f "$f" "$ARCHIVE/$day/"
   done
 }
 file_incoming
