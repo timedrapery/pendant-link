@@ -1,0 +1,10 @@
+[Unit]
+Description=Pull recordings from the Limitless pendant
+After=bluetooth.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/pendant/env
+ExecStart=%h/.local/bin/pendant-sync
+TimeoutStartSec=25min
+Nice=10

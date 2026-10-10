@@ -51,10 +51,20 @@ index e21933f..d005482 100644
  
              # Sync dependencies with uv
 diff --git a/proto/pendant.proto b/proto/pendant.proto
-index 22b2dea..bcf2dd3 100644
+index 22b2dea..52cb2dc 100644
 --- a/proto/pendant.proto
 +++ b/proto/pendant.proto
-@@ -124,12 +124,24 @@ message PendantAllMsg {
+@@ -73,7 +73,8 @@ message SetLed { int32 state = 1; }
+ message AddWifiCredentials { string ssid = 1; string password = 2; }
+ message SetBLEPair { bool enable = 1; }
+ message SetCurrentTime { int64 timestamp_ms = 1; }
+-message DeleteFlashPage { int32 page_index = 1; }
++// Deletes every stored page whose index is <= this value (from the Android app).
++message DeleteFlashPage { uint32 older_than_or_equal_to_index = 1; }
+ message DownloadFlashPages {
+   bool batch_mode_enabled = 1;
+   bool real_time_mode_enabled = 2;
+@@ -124,12 +125,24 @@ message PendantAllMsg {
    optional ResponseData response_data = 6;
  }
  
@@ -84,7 +94,7 @@ index 22b2dea..bcf2dd3 100644
  }
  
  message StorageBufferMsg {
-@@ -212,7 +224,24 @@ message BatteryStatus {
+@@ -212,7 +225,24 @@ message BatteryStatus {
    bool under_operating_temperature = 8;
    UsbState usb_state = 9;
  }
@@ -110,7 +120,7 @@ index 22b2dea..bcf2dd3 100644
  message RealTimeAudioDataResponse { bytes data = 1; int64 seq = 2; }
  message RealTimeAudioAckResponse { int64 seq = 1; }
  message ResponseData { int32 request_id = 1; bool success = 2; }
-@@ -258,10 +287,18 @@ message Chunk {
+@@ -258,10 +288,18 @@ message Chunk {
  }
  
  // Additional status messages for Chunk
@@ -132,6 +142,129 @@ index 22b2dea..bcf2dd3 100644
  }
  
  message BleStatus {
+diff --git a/src/pendant/commands/audio.py b/src/pendant/commands/audio.py
+index cf0b2e6..0e71f17 100644
+--- a/src/pendant/commands/audio.py
++++ b/src/pendant/commands/audio.py
+@@ -1,6 +1,7 @@
+ """Audio commands: download, decode, record, stop."""
+ 
+ import json
++import time
+ from datetime import datetime
+ from pathlib import Path
+ 
+@@ -8,15 +9,21 @@ import click
+ 
+ from pendant.core.config import MIN_VALID_TIMESTAMP_MS
+ from pendant.core.dbus_client import DBusClient
+-from pendant.core.protocol import load_private_key
++from pendant.core.protocol import load_private_key, safe_delete_index
+ from pendant.core.opus import decode_opus_file
+ 
+ 
+ @click.command()
+ @click.option('--decode', '-d', is_flag=True, help='Auto-decode opus to WAV')
+ @click.option('--output', '-o', type=click.Path(), default='.', help='Output directory')
++@click.option('--delete-after', is_flag=True,
++              help='After the files are saved, delete the downloaded pages from the pendant (only those pages).')
++@click.option('--idle-timeout', default=8, show_default=True,
++              help='Stop after this many seconds with no new pages.')
++@click.option('--max-time', default=900, show_default=True,
++              help='Upper limit on the whole download, in seconds.')
+ @click.pass_context
+-def download(ctx, decode, output):
++def download(ctx, decode, output, delete_after, idle_timeout, max_time):
+     """Download stored recordings from the pendant."""
+     from gi.repository import GLib
+ 
+@@ -42,8 +49,31 @@ def download(ctx, decode, output):
+         return False
+ 
+     GLib.timeout_add_seconds(2, start_download)
+-    client.run_with_timeout(120)
+-    client.disconnect()
++
++    # Stop once pages stop arriving, instead of after a fixed time.
++    watch = {"started": time.monotonic()}
++
++    def check_idle():
++        now = time.monotonic()
++        if client.last_page_time is None:
++            if now - watch["started"] > max(idle_timeout, 20):
++                client.stop()  # nothing stored, or the pendant never started sending
++                return False
++        elif now - client.last_page_time > idle_timeout:
++            client.stop()
++            return False
++        return True
++
++    GLib.timeout_add(500, check_idle)
++    try:
++        client.run_with_timeout(max_time)
++        _save_and_free(client, decode, output_dir, delete_after)
++    finally:
++        client.disconnect()
++
++
++def _save_and_free(client, decode, output_dir, delete_after):
++    """Write the downloaded audio to disk, then (optionally) free those pages on the pendant."""
+ 
+     # Save audio
+     click.echo(f"\n\nDownload complete!")
+@@ -72,21 +102,25 @@ def download(ctx, decode, output):
+         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+ 
+     opus_fname = None
++    written = []  # audio files saved in this run
+ 
+     if client.opus_data:
+         opus_fname = output_dir / f"pendant_{timestamp}.opus"
+         opus_fname.write_bytes(client.opus_data)
++        written.append(opus_fname)
+         click.echo(f"\nSaved: {opus_fname}")
+ 
+     if client.pcm_data:
+         fname = output_dir / f"pendant_{timestamp}.raw"
+         fname.write_bytes(client.pcm_data)
++        written.append(fname)
+         click.echo(f"Saved: {fname}")
+         click.echo(f"  Convert: ffmpeg -f s16le -ar 16000 -ac 1 -i {fname} output.wav")
+ 
+     if client.encrypted_data:
+         fname = output_dir / f"pendant_{timestamp}.enc"
+         fname.write_bytes(client.encrypted_data)
++        written.append(fname)
+         click.echo(f"Saved encrypted: {fname}")
+         click.echo("  To decrypt, run 'pendant crypto keygen' then 'pendant crypto setkey', then re-record and download")
+ 
+@@ -109,6 +143,26 @@ def download(ctx, decode, output):
+         json_fname.write_text(json.dumps(metadata, indent=2))
+         click.echo(f"Saved metadata: {json_fname}")
+ 
++    # Free the pages we just saved -- only through the end of the unbroken run we received.
++    if client.page_count:
++        lo, hi = min(client.page_indices), max(client.page_indices)
++        click.echo(f"  Page indexes: {lo} to {hi}" + (f" ({client.page_errors} flagged unreadable)" if client.page_errors else ""))
++    if delete_after:
++        through = safe_delete_index(client.page_indices)
++        if through is None:
++            click.echo("Nothing downloaded, so nothing to delete.")
++        else:
++            if through < max(client.page_indices):
++                click.echo(f"Warning: a page is missing after index {through}; keeping everything after it on the pendant.")
++            had_audio = bool(client.opus_data or client.pcm_data or client.encrypted_data)
++            saved_ok = all(f.exists() and f.stat().st_size > 0 for f in written) and bool(written)
++            if had_audio and not saved_ok:
++                raise click.ClickException("The audio wasn't saved, so nothing will be deleted from the pendant.")
++            click.echo(f"Freeing pages through index {through} on the pendant...")
++            client.send_command("delete_flash_page", index=through)
++            client.run_with_timeout(3)
++            click.echo("Freed.")
++
+     # Auto-decode opus to WAV if requested
+     if decode and opus_fname and opus_fname.exists():
+         wav_fname = opus_fname.with_suffix('.wav')
 diff --git a/src/pendant/commands/device.py b/src/pendant/commands/device.py
 index e05b050..35c65ab 100644
 --- a/src/pendant/commands/device.py
@@ -231,10 +364,14 @@ index 5278f23..ca072c2 100644
          elif rtype == "battery_status":
              print(f"\n  Battery: {response.get('level', 0)}%")
 diff --git a/src/pendant/core/dbus_client.py b/src/pendant/core/dbus_client.py
-index a5867ef..39448a6 100644
+index a5867ef..71435c9 100644
 --- a/src/pendant/core/dbus_client.py
 +++ b/src/pendant/core/dbus_client.py
-@@ -4,7 +4,7 @@ import subprocess
+@@ -1,10 +1,11 @@
+ """D-Bus backend for communicating with already-connected pendant."""
+ 
+ import subprocess
++import time
  from typing import Optional, Callable
  
  from .config import DEFAULT_PENDANT_ADDRESS, CONTROL_UUID, AUDIO_DATA_UUID
@@ -243,7 +380,17 @@ index a5867ef..39448a6 100644
  from .bluetooth import ensure_connected
  
  
-@@ -75,18 +75,16 @@ class DBusClient:
+@@ -32,6 +33,9 @@ class DBusClient:
+         self.page_timestamps = []  # List of page_info dicts with timestamps
+         self._status_printed = False  # Track if status already printed
+         self._info_printed = False  # Track if info already printed
++        self.page_indices = []  # StorageBufferMsg.index of each page received
++        self.page_errors = 0  # pages the pendant flagged as unreadable
++        self.last_page_time = None  # time.monotonic() of the latest page
+ 
+     def _init_dbus(self):
+         """Initialize D-Bus connection."""
+@@ -75,18 +79,16 @@ class DBusClient:
  
          if rtype == "device_info":
              if not self._info_printed:
@@ -268,7 +415,18 @@ index a5867ef..39448a6 100644
                  self._status_printed = True
  
          elif rtype == "battery_status":
-@@ -114,7 +112,10 @@ class DBusClient:
+@@ -99,6 +101,10 @@ class DBusClient:
+ 
+         elif rtype == "storage_buffer":
+             self.page_count += 1
++            self.last_page_time = time.monotonic()
++            self.page_indices.append(response.get("index", 0))
++            if response.get("error"):
++                self.page_errors += 1
+             flash_page = response.get("flash_page", b"")
+             if flash_page:
+                 if DEBUG_MODE:
+@@ -114,7 +120,10 @@ class DBusClient:
                  enc_str = f" enc={len(self.encrypted_data)}B" if self.encrypted_data else ""
                  print(f"\r  Page {self.page_count}: opus={len(self.opus_data)}B pcm={len(self.pcm_data)}B{enc_str}", end="", flush=True)
  
@@ -281,7 +439,7 @@ index a5867ef..39448a6 100644
  
          if self.on_response:
 diff --git a/src/pendant/core/protocol.py b/src/pendant/core/protocol.py
-index c342f7e..0d001ef 100644
+index c342f7e..459af84 100644
 --- a/src/pendant/core/protocol.py
 +++ b/src/pendant/core/protocol.py
 @@ -10,6 +10,36 @@ from .config import KEYS_DIR
@@ -321,7 +479,19 @@ index c342f7e..0d001ef 100644
  class PendantProtocol:
      """Implements the Pendant BLE protocol (protobuf encoding/decoding)."""
  
-@@ -166,39 +196,21 @@ class PendantProtocol:
+@@ -82,6 +112,11 @@ class PendantProtocol:
+             dl.real_time_mode_enabled = kwargs.get("realtime", False)
+             cmd.download_flash_pages.CopyFrom(dl)
+ 
++        elif cmd_type == "delete_flash_page":
++            dfp = pb.DeleteFlashPage()
++            dfp.older_than_or_equal_to_index = int(kwargs["index"])
++            cmd.delete_flash_page.CopyFrom(dfp)
++
+         elif cmd_type == "set_current_time":
+             sct = pb.SetCurrentTime()
+             sct.timestamp_ms = kwargs.get("timestamp_ms", int(datetime.now().timestamp() * 1000))
+@@ -166,39 +201,21 @@ class PendantProtocol:
              if content_type == "device_info":
                  info = msg.device_info
                  result.update({
@@ -372,7 +542,7 @@ index c342f7e..0d001ef 100644
  
              elif content_type == "storage_buffer":
                  buf = msg.storage_buffer
-@@ -232,8 +244,14 @@ class PendantProtocol:
+@@ -232,8 +249,14 @@ class PendantProtocol:
                  })
  
              elif content_type == "button_status":
@@ -388,7 +558,7 @@ index c342f7e..0d001ef 100644
                  })
  
              # Extract response_data if present
-@@ -381,6 +399,40 @@ class PendantProtocol:
+@@ -381,6 +404,58 @@ class PendantProtocol:
              return None
  
  
@@ -424,6 +594,24 @@ index c342f7e..0d001ef 100644
 +    if info.get("status"):
 +        lines.extend(format_status_lines(info["status"]))
 +    return lines
++
++
++def safe_delete_index(page_indices) -> Optional[int]:
++    """Highest page index that can be deleted without losing anything.
++
++    The pendant's delete command removes every page at or below an index, so only
++    delete through the end of the unbroken run that starts at the lowest page we
++    received. If a page in the middle never arrived, stop just before the gap.
++    """
++    indices = sorted(set(page_indices))
++    if not indices:
++        return None
++    end = indices[0]
++    for i in indices[1:]:
++        if i != end + 1:
++            break
++        end = i
++    return end
 +
 +
  def load_private_key():
@@ -530,3 +718,97 @@ index ad39d00..822bfc5 100644
 +    assert not any("Serial" in l for l in lines)
 +    lines = format_device_info_lines({"firmware_version": "1.1.20", "serial_number": "PND-1", "device_id": 7})
 +    assert any("Serial: PND-1" in l for l in lines)
+diff --git a/tests/test_sync_safety.py b/tests/test_sync_safety.py
+new file mode 100644
+index 0000000..9c21660
+--- /dev/null
++++ b/tests/test_sync_safety.py
+@@ -0,0 +1,88 @@
++"""Safety tests for freeing pages on the pendant after a download."""
++import click
++import pytest
++
++from pendant.core.protocol import PendantProtocol, safe_delete_index
++from pendant.core.proto import pb
++from pendant.commands.audio import _save_and_free
++
++
++def test_safe_delete_index_contiguous():
++    assert safe_delete_index([5, 6, 7]) == 7
++
++
++def test_safe_delete_index_stops_before_gap():
++    # page 7 never arrived: deleting "through 9" would destroy it
++    assert safe_delete_index([5, 6, 8, 9]) == 6
++
++
++def test_safe_delete_index_unordered_and_duplicates():
++    assert safe_delete_index([9, 7, 8, 7, 10]) == 10
++
++
++def test_safe_delete_index_empty():
++    assert safe_delete_index([]) is None
++
++
++def test_delete_command_encoding():
++    raw = PendantProtocol().create_command("delete_flash_page", index=1234)
++    env = pb.BLEMessageFromNativeToPendant()
++    env.ParseFromString(raw)
++    cmd = pb.ServerCommandMsg()
++    cmd.ParseFromString(env.payload)
++    assert cmd.WhichOneof("content") == "delete_flash_page"
++    assert cmd.delete_flash_page.older_than_or_equal_to_index == 1234
++
++
++class FakeClient:
++    def __init__(self, indices, opus=b"\x01" * 50):
++        self.page_count = len(indices)
++        self.page_indices = list(indices)
++        self.page_errors = 0
++        self.opus_data = bytearray(opus)
++        self.pcm_data = bytearray()
++        self.encrypted_data = bytearray()
++        self.page_timestamps = [{"absolute_timestamp_ms": 1760118000000 + i, "boot_uptime_ms": 0, "chunks": []}
++                                for i in range(len(indices))]
++        self.sent = []
++
++    def send_command(self, name, **kw):
++        self.sent.append((name, kw))
++
++    def run_with_timeout(self, seconds):
++        pass
++
++
++def test_saves_file_then_frees_through_contiguous_end(tmp_path):
++    c = FakeClient([100, 101, 102])
++    _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=True)
++    assert list(tmp_path.glob("pendant_*.opus"))
++    assert c.sent == [("delete_flash_page", {"index": 102})]
++
++
++def test_gap_limits_deletion(tmp_path):
++    c = FakeClient([100, 101, 103])
++    _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=True)
++    assert c.sent == [("delete_flash_page", {"index": 101})]
++
++
++def test_no_delete_without_flag(tmp_path):
++    c = FakeClient([100, 101])
++    _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=False)
++    assert c.sent == []
++
++
++def test_nothing_downloaded_deletes_nothing(tmp_path):
++    c = FakeClient([], opus=b"")
++    _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=True)
++    assert c.sent == []
++
++
++def test_failed_save_deletes_nothing(tmp_path, monkeypatch):
++    from pathlib import Path
++    c = FakeClient([1, 2, 3])
++    real = Path.write_bytes
++    monkeypatch.setattr(Path, "write_bytes", lambda self, data: real(self, b""))  # simulate an empty write
++    with pytest.raises(click.ClickException):
++        _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=True)
++    assert c.sent == []

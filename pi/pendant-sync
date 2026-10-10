@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Pull new recordings off the pendant, file them by date, and free only those pages on the pendant.
+# Runs from the pendant-sync timer every 15 minutes, or by hand: pendant-sync
+set -euo pipefail
+
+PENDANT="${PENDANT_BIN:-$HOME/.local/bin/pendant}"
+ARCHIVE="${PENDANT_ARCHIVE:-$HOME/recordings}"
+INCOMING="$ARCHIVE/.incoming"
+export PYTHONUNBUFFERED=1
+
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*"; }
+
+if [ -z "${PENDANT_ADDRESS:-}" ]; then
+  log "PENDANT_ADDRESS isn't set. Put it in ~/.config/pendant/env (PENDANT_ADDRESS=AA:BB:CC:DD:EE:FF)."
+  exit 1
+fi
+
+mkdir -p "$INCOMING"
+
+# One sync at a time.
+exec 9>"$ARCHIVE/.sync.lock"
+if ! flock -n 9; then
+  log "A sync is already running; skipping."
+  exit 0
+fi
+
+# Out of range or asleep: skip quietly and try again next time.
+if ! timeout 45 "$PENDANT" status >/dev/null 2>&1; then
+  log "Pendant not reachable; skipping."
+  exit 0
+fi
+
+# Anything left in .incoming from an interrupted run gets filed first.
+file_incoming() {
+  local f day
+  for f in "$INCOMING"/pendant_*; do
+    [ -e "$f" ] || continue
+    day=$(basename "$f" | sed -E 's/^pendant_([0-9]{4})([0-9]{2})([0-9]{2})_.*/\1-\2-\3/')
+    case "$day" in
+      [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
+      *) day="undated" ;;
+    esac
+    mkdir -p "$ARCHIVE/$day"
+    mv -n "$f" "$ARCHIVE/$day/"
+  done
+}
+file_incoming
+
+log "Syncing from $PENDANT_ADDRESS"
+cd "$INCOMING"
+timeout 1200 "$PENDANT" download --decode --delete-after -o "$INCOMING"
+file_incoming
+log "Done. Recordings are in $ARCHIVE"
