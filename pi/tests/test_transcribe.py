@@ -16,17 +16,27 @@ def tr(tmp_path, monkeypatch):
     spec = importlib.util.spec_from_file_location("pendant_transcribe", HERE / "pendant-transcribe.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    real = mod.read_wav
+
+    def tracking(wav):  # lets FakeModel know which recording the samples came from
+        FakeModel.current = Path(wav).name
+        return real(wav)
+
+    mod.read_wav = tracking
     return mod
 
 
 class FakeModel:
+    current = None
+
     def __init__(self, script=None, fail=()):
         self.script = script or {}
         self.fail = set(fail)
         self.calls = []
 
-    def transcribe(self, path, **kw):
-        name = Path(path).name
+    def transcribe(self, audio, **kw):
+        assert audio.dtype.name == "float32"  # raw samples, not a path
+        name = self.current
         self.calls.append((name, kw))
         if name in self.fail:
             raise RuntimeError("bad audio")
@@ -34,11 +44,18 @@ class FakeModel:
         return iter(segs), SimpleNamespace(duration=120.0)
 
 
+def _write_wav(path, seconds=0.5, rate=16000, channels=1):
+    import wave
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(channels); w.setsampwidth(2); w.setframerate(rate)
+        w.writeframes(b"\x00\x10" * int(seconds * rate) * channels)
+
+
 def _rec(archive, stamp, start_ms=None):
     day = archive / f"{stamp[:4]}-{stamp[4:6]}-{stamp[6:8]}"
     day.mkdir(parents=True, exist_ok=True)
     wav = day / f"pendant_{stamp}.wav"
-    wav.write_bytes(b"RIFF")
+    _write_wav(wav)
     if start_ms is not None:
         (day / f"pendant_{stamp}.json").write_text(json.dumps({"recording_start_ms": start_ms}))
     return wav
@@ -127,3 +144,19 @@ def test_second_run_waits_for_lock(tr, tmp_path):
     m = FakeModel()
     assert tr.main([], model_factory=lambda: m) == 0
     assert m.calls == []
+
+
+def test_reads_real_wav_samples(tr, tmp_path):
+    wav = tmp_path / "a.wav"
+    _write_wav(wav, seconds=1.0)
+    audio = tr.read_wav.__wrapped__(wav) if hasattr(tr.read_wav, "__wrapped__") else tr.read_wav(wav)
+    assert audio.shape == (16000,) and audio.dtype.name == "float32"
+    assert abs(float(audio[0]) - 0x1000 / 32768.0) < 1e-6
+
+
+def test_wrong_wav_format_fails_that_one_only(tr, tmp_path):
+    bad = _rec(tmp_path, "20261010_090000")
+    _write_wav(bad, rate=44100, channels=2)
+    good = _rec(tmp_path, "20261010_100000")
+    rc = tr.main([], model_factory=lambda: FakeModel({good.name: [(1, 2, "ok")]}))
+    assert rc == 1 and not bad.with_suffix(".txt").exists() and good.with_suffix(".txt").exists()

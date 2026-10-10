@@ -55,6 +55,23 @@ def recording_start(wav: Path):
     return datetime.strptime(m.group(1), "%Y%m%d_%H%M%S") if m else None
 
 
+def read_wav(wav: Path):
+    """16 kHz mono 16-bit WAV (what pendant-cli writes) as float32 samples.
+
+    Read directly instead of through faster-whisper's PyAV decoder, which breaks with
+    newer PyAV versions ("unexpected keyword argument 'metadata_errors'").
+    """
+    import wave
+    import numpy as np
+
+    with wave.open(str(wav), "rb") as w:
+        rate, channels, width = w.getframerate(), w.getnchannels(), w.getsampwidth()
+        frames = w.readframes(w.getnframes())
+    if (rate, channels, width) != (16000, 1, 2):
+        raise ValueError(f"expected 16 kHz mono 16-bit WAV, got {rate} Hz, {channels} ch, {8 * width}-bit")
+    return np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
+
+
 def _write_atomic(path: Path, text: str):
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(text)
@@ -65,7 +82,7 @@ def transcribe_one(model, wav: Path):
     """Transcribe one WAV. Returns (seconds of audio, number of speech lines)."""
     start = recording_start(wav)
     segments, info = model.transcribe(
-        str(wav), language="en", beam_size=BEAM, vad_filter=True,
+        read_wav(wav), language="en", beam_size=BEAM, vad_filter=True,
         condition_on_previous_text=False,
     )
     lines, words = [], []
