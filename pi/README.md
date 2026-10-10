@@ -10,10 +10,11 @@
 - **Device info** (`pendant info`) shows firmware, serial, device ID, Bluetooth address (in normal byte order), flash pages, and whether the pendant holds its own public key. That key is the pendant's, so its presence doesn't mean recordings are encrypted.
 - **Wi-Fi status** uses the real layout (state, signal, uptime, network name).
 - Status updates that leave out the recording state no longer print "unknown".
+- `pendant info` waits for the pendant's reply (asking again once if needed, up to 10 seconds) instead of giving up after 3.
 - Messages that fail to decode are printed instead of silently dropped.
 - The docs' `protoc` command gains `-I proto`, so the generated file lands in `proto/`.
 
-It applies cleanly to upstream commit `1c71659` and passes pendant-cli's test suite (28 tests).
+It applies cleanly to upstream commit `1c71659` and passes pendant-cli's test suite (55 tests).
 
 ### Apply on the Pi
 

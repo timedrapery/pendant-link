@@ -133,10 +133,40 @@ index 22b2dea..bcf2dd3 100644
  
  message BleStatus {
 diff --git a/src/pendant/commands/device.py b/src/pendant/commands/device.py
-index e05b050..b2c657c 100644
+index e05b050..35c65ab 100644
 --- a/src/pendant/commands/device.py
 +++ b/src/pendant/commands/device.py
-@@ -76,18 +76,24 @@ def listen(ctx, timeout):
+@@ -46,10 +46,27 @@ def info(ctx):
+     click.echo("\nGetting device info...")
+     client.send_command("get_device_info")
+ 
+-    GLib.timeout_add_seconds(3, lambda: client.stop() or False)
+-    client.run_with_timeout(5)
++    # Wait for the reply instead of a fixed 3 seconds: finish as soon as it
++    # arrives, ask once more if it hasn't come after 3 seconds, give up at 10.
++    state = {"elapsed": 0.0, "retried": False}
++
++    def check():
++        if client._info_printed:
++            client.stop()
++            return False
++        state["elapsed"] += 0.5
++        if state["elapsed"] >= 3 and not state["retried"]:
++            state["retried"] = True
++            client.send_command("get_device_info")
++        return True
++
++    GLib.timeout_add(500, check)
++    client.run_with_timeout(10)
+     client.disconnect()
+ 
++    if not client._info_printed:
++        raise click.ClickException("No device info received after 10 seconds. Tap the pendant to wake it and try again.")
++
+ 
+ @click.command()
+ @click.option('--timeout', '-t', default=60, help='Timeout in seconds (0 = indefinite)')
+@@ -76,18 +93,24 @@ def listen(ctx, timeout):
          timestamp = datetime.now().strftime("%H:%M:%S")
          
          if rtype == "button_status":
@@ -251,7 +281,7 @@ index a5867ef..39448a6 100644
  
          if self.on_response:
 diff --git a/src/pendant/core/protocol.py b/src/pendant/core/protocol.py
-index c342f7e..7c9920e 100644
+index c342f7e..a4571d0 100644
 --- a/src/pendant/core/protocol.py
 +++ b/src/pendant/core/protocol.py
 @@ -10,6 +10,36 @@ from .config import KEYS_DIR
@@ -358,7 +388,7 @@ index c342f7e..7c9920e 100644
                  })
  
              # Extract response_data if present
-@@ -381,6 +399,40 @@ class PendantProtocol:
+@@ -381,6 +399,41 @@ class PendantProtocol:
              return None
  
  
@@ -388,7 +418,8 @@ index c342f7e..7c9920e 100644
 +        lines.append(f"  Bluetooth address: {info['ble_mac_address']}")
 +    if info.get("battery_percent"):
 +        lines.append(f"  Battery: {info['battery_percent']}%")
-+    lines.append(f"  Flash pages: oldest {info.get('oldest_flash_page', 0)}, newest {info.get('newest_flash_page', 0)}")
++    if info.get("oldest_flash_page") or info.get("newest_flash_page"):
++        lines.append(f"  Flash pages: oldest {info['oldest_flash_page']}, newest {info['newest_flash_page']}")
 +    lines.append(f"  Device public key: {'present' if info.get('has_device_public_key') else 'none'} "
 +                 "(the pendant's own key; it doesn't mean recordings are encrypted)")
 +    if info.get("status"):
