@@ -2,7 +2,7 @@
 # Copy the recordings archive to Google Drive, encrypted on the Pi first (rclone crypt).
 # Copies, never mirrors: deleting something here never deletes the backup.
 # Skips .wav files (rebuild them with `pendant decode`) and anything still in .incoming.
-# Runs nightly from pendant-backup.timer, or by hand: pendant-backup
+# Run it as `pendant backup`; pendant-backup.timer does that every night.
 set -euo pipefail
 
 ARCHIVE="${PENDANT_ARCHIVE:-$HOME/recordings}"

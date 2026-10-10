@@ -5,6 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=%h/.local/bin/pendant-backup
+EnvironmentFile=%h/.config/pendant/env
+ExecStart=/bin/sh -c 'exec "$PENDANT_BIN" backup'
 TimeoutStartSec=3h
 Nice=10

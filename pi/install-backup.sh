@@ -2,7 +2,7 @@
 # Sets up the nightly encrypted backup of ~/recordings to Google Drive.
 # Usage (on the Pi): curl -fsSL <raw URL of this file> | bash -s <commit>
 # Connect with `ssh -L 53682:127.0.0.1:53682 ...` first: the Google sign-in opens in your desktop's browser.
-# Does not start the timer. Run `pendant-backup` once by hand first.
+# Does not start the timer. Run `pendant backup` once by hand first.
 set -euo pipefail
 
 REF="${1:-main}"
@@ -11,6 +11,11 @@ KEYS="$HOME/.config/pendant/keys"
 PASSFILE="$KEYS/backup-crypt.txt"
 
 say() { echo "==> $*"; }
+
+if ! pendant backup --help >/dev/null 2>&1; then
+  echo "The pendant command doesn't have 'backup' yet. Run install-sync.sh (same commit) first, then this."
+  exit 1
+fi
 
 if ! command -v rclone >/dev/null; then
   say "Installing rclone"
@@ -77,14 +82,15 @@ if ! rclone listremotes 2>/dev/null | grep -qx "pendant-backup:"; then
   say "Set up the encrypted backup folder (pendant-backup on your Drive)"
 fi
 
-say "Installing pendant-backup"
-mkdir -p "$HOME/.local/bin" "$HOME/.config/systemd/user"
-curl -fsSL "$BASE/pendant-backup" -o "$HOME/.local/bin/pendant-backup"
-chmod +x "$HOME/.local/bin/pendant-backup"
+say "Installing pendant backup"
+mkdir -p "$HOME/.local/share/pendant" "$HOME/.config/systemd/user"
+curl -fsSL "$BASE/pendant-backup" -o "$HOME/.local/share/pendant/pendant-backup"
+chmod +x "$HOME/.local/share/pendant/pendant-backup"
+rm -f "$HOME/.local/bin/pendant-backup"   # an earlier version put it here
 curl -fsSL "$BASE/pendant-backup.service" -o "$HOME/.config/systemd/user/pendant-backup.service"
 curl -fsSL "$BASE/pendant-backup.timer" -o "$HOME/.config/systemd/user/pendant-backup.timer"
 systemctl --user daemon-reload
 
-say "Installed. Next: run 'pendant-backup' once by hand."
+say "Installed. Next: run 'pendant backup' once by hand."
 echo "    The backup's passwords are in $PASSFILE. Keep a copy off the Pi"
 echo "    (a USB stick or a password manager): without them the backup can't be read."

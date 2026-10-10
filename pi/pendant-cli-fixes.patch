@@ -250,7 +250,7 @@ index aae62ae..0924185 100644
  ]
  
 diff --git a/src/pendant/cli.py b/src/pendant/cli.py
-index fb98890..e3228ea 100644
+index fb98890..0c86086 100644
 --- a/src/pendant/cli.py
 +++ b/src/pendant/cli.py
 @@ -19,7 +19,7 @@ def cli(ctx, address, verbose):
@@ -262,11 +262,12 @@ index fb98890..e3228ea 100644
  
  # Register individual commands
  cli.add_command(device.status)
-@@ -30,6 +30,7 @@ cli.add_command(audio.decode)
+@@ -30,6 +30,8 @@ cli.add_command(audio.decode)
  cli.add_command(audio.record)
  cli.add_command(audio.stop)
  cli.add_command(audio.clear)
 +cli.add_command(sync.sync)
++cli.add_command(sync.backup)
  
  # Register command groups
  cli.add_command(bluetooth.bt)
@@ -685,13 +686,15 @@ index e05b050..35c65ab 100644
  
 diff --git a/src/pendant/commands/sync.py b/src/pendant/commands/sync.py
 new file mode 100644
-index 0000000..7477f34
+index 0000000..8b18ee9
 --- /dev/null
 +++ b/src/pendant/commands/sync.py
-@@ -0,0 +1,26 @@
-+"""`pendant sync`: pull new recordings, file them by date, free only what was saved.
+@@ -0,0 +1,41 @@
++"""`pendant sync` and `pendant backup`: run the scripts install-sync.sh / install-backup.sh
++put in ~/.local/share/pendant/.
 +
-+Runs the sync script that install-sync.sh puts in ~/.local/share/pendant/.
++sync:   pull new recordings, file them by date, free only what was saved.
++backup: copy ~/recordings to Google Drive, encrypted on the Pi first.
 +"""
 +
 +import os
@@ -699,7 +702,19 @@ index 0000000..7477f34
 +
 +import click
 +
-+DEFAULT_SCRIPT = Path.home() / ".local" / "share" / "pendant" / "pendant-sync"
++SCRIPTS_DIR = Path.home() / ".local" / "share" / "pendant"
++DEFAULT_SCRIPT = SCRIPTS_DIR / "pendant-sync"
++
++
++def _run_script(ctx, script: Path, installer: str):
++    if not script.is_file():
++        raise click.ClickException(
++            f"This isn't installed ({script} is missing). Run {installer} first."
++        )
++    env = dict(os.environ)
++    if ctx.obj.get("address"):
++        env["PENDANT_ADDRESS"] = ctx.obj["address"]
++    os.execve(str(script), [str(script)], env)
 +
 +
 +@click.command()
@@ -707,14 +722,15 @@ index 0000000..7477f34
 +def sync(ctx):
 +    """Pull new recordings into ~/recordings/<date>/ and free them on the pendant."""
 +    script = Path(os.environ.get("PENDANT_SYNC_SCRIPT", DEFAULT_SCRIPT))
-+    if not script.is_file():
-+        raise click.ClickException(
-+            f"Sync isn't installed ({script} is missing). Run install-sync.sh first."
-+        )
-+    env = dict(os.environ)
-+    if ctx.obj.get("address"):
-+        env["PENDANT_ADDRESS"] = ctx.obj["address"]
-+    os.execve(str(script), [str(script)], env)
++    _run_script(ctx, script, "install-sync.sh")
++
++
++@click.command()
++@click.pass_context
++def backup(ctx):
++    """Copy ~/recordings to Google Drive, encrypted on this computer first."""
++    script = Path(os.environ.get("PENDANT_BACKUP_SCRIPT", SCRIPTS_DIR / "pendant-backup"))
++    _run_script(ctx, script, "install-backup.sh")
 diff --git a/src/pendant/core/audiocrypto.py b/src/pendant/core/audiocrypto.py
 new file mode 100644
 index 0000000..536d62c
@@ -1538,10 +1554,10 @@ index ad39d00..822bfc5 100644
 +    assert any("Serial: PND-1" in l for l in lines)
 diff --git a/tests/test_sync_command.py b/tests/test_sync_command.py
 new file mode 100644
-index 0000000..96dfbc7
+index 0000000..5d301b2
 --- /dev/null
 +++ b/tests/test_sync_command.py
-@@ -0,0 +1,28 @@
+@@ -0,0 +1,40 @@
 +"""`pendant sync` hands off to the installed sync script."""
 +
 +import os
@@ -1570,6 +1586,18 @@ index 0000000..96dfbc7
 +    assert result.exit_code == 0, result.output
 +    assert calls[0][0] == str(script)
 +    assert calls[0][1]["PENDANT_ADDRESS"] == "C2:72:BC:F1:88:3F"
++
++
++def test_backup_runs_its_script(tmp_path, monkeypatch):
++    script = tmp_path / "pendant-backup"
++    script.write_text("#!/bin/sh\n")
++    script.chmod(script.stat().st_mode | stat.S_IEXEC)
++    monkeypatch.setenv("PENDANT_BACKUP_SCRIPT", str(script))
++    calls = []
++    monkeypatch.setattr(os, "execve", lambda path, argv, env: calls.append(path))
++    result = CliRunner().invoke(cli, ["backup"])
++    assert result.exit_code == 0, result.output
++    assert calls == [str(script)]
 diff --git a/tests/test_sync_safety.py b/tests/test_sync_safety.py
 new file mode 100644
 index 0000000..9c21660
