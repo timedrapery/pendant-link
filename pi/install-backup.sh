@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Sets up the nightly encrypted backup of ~/recordings to Google Drive.
 # Usage (on the Pi): curl -fsSL <raw URL of this file> | bash -s <commit>
-# You'll be asked to paste the token from `rclone authorize` on your desktop.
+# Connect with `ssh -L 53682:127.0.0.1:53682 ...` first: the Google sign-in opens in your desktop's browser.
 # Does not start the timer. Run `pendant-backup` once by hand first.
 set -euo pipefail
 
@@ -32,15 +32,21 @@ P1=$(sed -n 's/^password=//p' "$PASSFILE")
 P2=$(sed -n 's/^password2=//p' "$PASSFILE")
 
 # Google Drive connection (only files rclone itself creates: drive.file).
+# The Pi runs the sign-in itself. Your desktop's browser reaches it through the SSH
+# connection (ssh -L 53682:127.0.0.1:53682 ...), and nothing is installed or kept there.
 if ! rclone listremotes 2>/dev/null | grep -qx "gdrive:"; then
+  OUT="$(mktemp)"
   echo
-  echo "Paste the token that 'rclone authorize' printed on your desktop"
-  echo "(the whole line starting with {\"access_token\"), then press Enter:"
-  read -r TOKEN < "${PENDANT_TTY:-/dev/tty}"
-  case "$TOKEN" in
-    \{*access_token*\}) ;;
-    *) echo "That doesn't look like the token. Nothing was changed; run this again."; exit 1 ;;
-  esac
+  echo "Open the link below in your desktop's browser, sign in to Google, and click Allow."
+  echo "(This works only if you connected with: ssh -L 53682:127.0.0.1:53682 alexander@xrxpix.local)"
+  echo
+  rclone authorize "drive" "eyJzY29wZSI6ImRyaXZlLmZpbGUifQ" --auth-no-open-browser > "$OUT" || true
+  TOKEN="$(grep -m1 '^{.*access_token.*}$' "$OUT" || true)"
+  rm -f "$OUT"
+  if [ -z "$TOKEN" ]; then
+    echo "Didn't get a token from Google. Nothing was changed; run this again."
+    exit 1
+  fi
   rclone config create gdrive drive scope=drive.file token="$TOKEN" --non-interactive >/dev/null
   say "Connected to Google Drive"
 fi
@@ -60,5 +66,5 @@ curl -fsSL "$BASE/pendant-backup.timer" -o "$HOME/.config/systemd/user/pendant-b
 systemctl --user daemon-reload
 
 say "Installed. Next: run 'pendant-backup' once by hand."
-echo "    The backup passwords are in $PASSFILE. Copy your keys folder to your desktop again:"
-echo "    without these passwords the backup can't be read."
+echo "    The backup's passwords are in $PASSFILE. Keep a copy off the Pi"
+echo "    (a USB stick or a password manager): without them the backup can't be read."
