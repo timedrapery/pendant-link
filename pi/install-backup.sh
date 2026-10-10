@@ -43,7 +43,7 @@ if ! rclone listremotes 2>/dev/null | grep -qx "gdrive:"; then
   OUT="$(mktemp)"
   echo
   echo "Open the link below in your desktop's browser, sign in to Google, and click Allow."
-  echo "(This works only if you connected with: ssh -L 53682:127.0.0.1:53682 alexander@xrxpix.local)"
+  echo "(This works only if you connected with: ssh -L 53682:127.0.0.1:53682 <you>@<your-pi>.local)"
   echo
   rclone authorize "drive" "eyJzY29wZSI6ImRyaXZlLmZpbGUifQ" --auth-no-open-browser > "$OUT" || true
   # rclone prints the result between "--->" and "<---End paste": either the token itself,

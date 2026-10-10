@@ -1754,7 +1754,7 @@ index 0000000..81bc40d
 +    pages = [{"absolute_timestamp_ms": 12345, "audio_offset_bytes": 0, "chunks": [{"time_offset_ms": 0}]}]
 +    assert build_timeline(pages, [(0, 0)]) == []
 diff --git a/tests/test_protocol.py b/tests/test_protocol.py
-index ad39d00..1de6f7a 100644
+index ad39d00..20fbd8c 100644
 --- a/tests/test_protocol.py
 +++ b/tests/test_protocol.py
 @@ -73,6 +73,8 @@ class TestPendantProtocol:
@@ -1811,9 +1811,9 @@ index ad39d00..1de6f7a 100644
 +    """The pendant sends its MAC little-endian; it should display in normal order."""
 +    from pendant.core.proto import pb
 +    msg = pb.PendantAllMsg()
-+    msg.device_info.ble_mac_address = bytes.fromhex("3f88f1bc72c2")  # as observed from a real pendant
++    msg.device_info.ble_mac_address = bytes.fromhex("ffeeddccbbaa")  # sent little-endian, as a real pendant does
 +    result = protocol.parse_response(msg.SerializeToString())
-+    assert result["ble_mac_address"] == "C2:72:BC:F1:88:3F"
++    assert result["ble_mac_address"] == "AA:BB:CC:DD:EE:FF"
 +
 +
 +def test_partial_status_omits_recording_line():
@@ -1853,7 +1853,7 @@ index ad39d00..1de6f7a 100644
 +    assert raw == b"\x08\x01\x18\x01"  # red=1, blue=3
 diff --git a/tests/test_sync_command.py b/tests/test_sync_command.py
 new file mode 100644
-index 0000000..01e90d2
+index 0000000..0943e9e
 --- /dev/null
 +++ b/tests/test_sync_command.py
 @@ -0,0 +1,60 @@
@@ -1881,10 +1881,10 @@ index 0000000..01e90d2
 +    monkeypatch.setenv("PENDANT_SYNC_SCRIPT", str(script))
 +    calls = []
 +    monkeypatch.setattr(os, "execve", lambda path, argv, env: calls.append((path, env)))
-+    result = CliRunner().invoke(cli, ["-a", "C2:72:BC:F1:88:3F", "sync"])
++    result = CliRunner().invoke(cli, ["-a", "AA:BB:CC:DD:EE:FF", "sync"])
 +    assert result.exit_code == 0, result.output
 +    assert calls[0][0] == str(script)
-+    assert calls[0][1]["PENDANT_ADDRESS"] == "C2:72:BC:F1:88:3F"
++    assert calls[0][1]["PENDANT_ADDRESS"] == "AA:BB:CC:DD:EE:FF"
 +
 +
 +def test_backup_runs_its_script(tmp_path, monkeypatch):
