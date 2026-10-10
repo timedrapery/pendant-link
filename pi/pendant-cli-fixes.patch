@@ -286,7 +286,7 @@ index fb98890..4c861ff 100644
  # Register command groups
  cli.add_command(bluetooth.bt)
 diff --git a/src/pendant/commands/audio.py b/src/pendant/commands/audio.py
-index cf0b2e6..4bb0a47 100644
+index cf0b2e6..224ba80 100644
 --- a/src/pendant/commands/audio.py
 +++ b/src/pendant/commands/audio.py
 @@ -1,6 +1,7 @@
@@ -407,7 +407,7 @@ index cf0b2e6..4bb0a47 100644
          # Check if timestamps are real (synced) or just device uptime
          first_ts = client.page_timestamps[0].get("absolute_timestamp_ms", 0) if client.page_timestamps else 0
          timestamps_synced = first_ts > MIN_VALID_TIMESTAMP_MS
-@@ -103,12 +143,39 @@ def download(ctx, decode, output):
+@@ -103,19 +143,48 @@ def download(ctx, decode, output):
              "timestamps_synced": timestamps_synced,
              "total_pages": client.page_count,
              "total_audio_bytes": len(client.opus_data),
@@ -448,6 +448,36 @@ index cf0b2e6..4bb0a47 100644
      # Auto-decode opus to WAV if requested
      if decode and opus_fname and opus_fname.exists():
          wav_fname = opus_fname.with_suffix('.wav')
+         click.echo(f"\nDecoding to WAV...")
+         try:
+-            if decode_opus_file(str(opus_fname), str(wav_fname)):
++            frame_map = []
++            if decode_opus_file(str(opus_fname), str(wav_fname), frame_map=frame_map):
+                 click.echo(f"Decoded: {wav_fname}")
++                _add_timeline(opus_fname.with_suffix(".json"), client.page_timestamps, frame_map)
+         except Exception as e:
+             click.echo(f"Decode failed: {e}")
+             click.echo(f"  Manual: pendant decode {opus_fname}")
+@@ -123,6 +192,19 @@ def download(ctx, decode, output):
+         click.echo(f"  Decode: pendant decode {opus_fname}")
+ 
+ 
++def _add_timeline(json_path, pages, frame_map):
++    """Record when each stretch of audio really happened (see build_timeline)."""
++    from pendant.core.protocol import build_timeline
++    if not json_path.exists():
++        return
++    try:
++        meta = json.loads(json_path.read_text())
++        meta["timeline"] = build_timeline(pages, frame_map)
++        json_path.write_text(json.dumps(meta, indent=2))
++    except (OSError, ValueError) as e:
++        click.echo(f"  (couldn't add the timeline: {e})")
++
++
+ @click.command()
+ @click.argument('input_file', type=click.Path(exists=True))
+ @click.argument('output_file', type=click.Path(), required=False)
 diff --git a/src/pendant/commands/crypto.py b/src/pendant/commands/crypto.py
 index cc35325..e15eac4 100644
 --- a/src/pendant/commands/crypto.py
@@ -1079,8 +1109,47 @@ index a5867ef..222bebd 100644
              print(f"\n  Response: {rtype}")
  
          if self.on_response:
+diff --git a/src/pendant/core/opus.py b/src/pendant/core/opus.py
+index 0a797ea..16d9f6b 100644
+--- a/src/pendant/core/opus.py
++++ b/src/pendant/core/opus.py
+@@ -70,13 +70,15 @@ def parse_opus_toc(toc_byte: int) -> tuple[int, int, int]:
+     return int(duration_ms), stereo, frame_count_code
+ 
+ 
+-def decode_opus_file(input_path: str, output_path: str, verbose: bool = False) -> bool:
++def decode_opus_file(input_path: str, output_path: str, verbose: bool = False, frame_map: list = None) -> bool:
+     """Decode raw opus frames to WAV.
+ 
+     Args:
+         input_path: Path to input .opus file (raw Opus frames)
+         output_path: Path to output .wav file
+         verbose: Show detailed frame info
++        frame_map: if given, gets (byte offset, sample offset) for each decoded frame, so
++            positions in the .opus can be turned into positions in the .wav
+ 
+     Returns:
+         True if successful, False otherwise
+@@ -100,6 +102,7 @@ def decode_opus_file(input_path: str, output_path: str, verbose: bool = False) -
+     frame_count = 0
+     errors = 0
+     total_duration_ms = 0
++    total_samples = 0
+ 
+     # Track dominant TOC to detect consistent frame format
+     toc_counts = {}
+@@ -154,6 +157,9 @@ def decode_opus_file(input_path: str, output_path: str, verbose: bool = False) -
+ 
+         if best_frame:
+             decoded_data, frame_size, toc, dur, samples = best_frame
++            if frame_map is not None:
++                frame_map.append((offset, total_samples))
++            total_samples += len(decoded_data) // 2
+             pcm_samples.append(decoded_data)
+             offset += frame_size
+             frame_count += 1
 diff --git a/src/pendant/core/protocol.py b/src/pendant/core/protocol.py
-index c342f7e..9539622 100644
+index c342f7e..433601e 100644
 --- a/src/pendant/core/protocol.py
 +++ b/src/pendant/core/protocol.py
 @@ -10,12 +10,44 @@ from .config import KEYS_DIR
@@ -1281,7 +1350,7 @@ index c342f7e..9539622 100644
  
                      if DEBUG_MODE and audio.codec_type:
                          print(f"        codec_type: {audio.codec_type}, num_frames: {audio.num_frames}")
-@@ -359,62 +405,70 @@ class PendantProtocol:
+@@ -359,62 +405,98 @@ class PendantProtocol:
  
          return bytes(opus_data), bytes(pcm_data), bytes(encrypted_data), codec_type, page_info
  
@@ -1402,6 +1471,34 @@ index c342f7e..9539622 100644
 +    """The AES key saved by 'pendant crypto setkey', or None. (Kept under the old name.)"""
 +    from .audiocrypto import load_audio_key
 +    return load_audio_key()
++
++
++def build_timeline(pages, frame_map, sample_rate=16000):
++    """[[seconds into the .wav, clock time in ms], ...] at the start of each audio chunk.
++
++    The pendant records only while it hears speech, so a recording is stretches with gaps
++    between them. Each chunk carries its own clock time; this lines those up with the
++    decoded audio, so a moment in the .wav can be given its real time of day.
++    """
++    import bisect
++    offsets = [o for o, _ in frame_map]
++    timeline = []
++    for page in pages:
++        base_ts = page.get("absolute_timestamp_ms", 0)
++        base_bytes = page.get("audio_offset_bytes")
++        if not base_ts or base_ts < 1577836800000 or base_bytes is None:
++            continue
++        for chunk in page.get("chunks", []):
++            byte_pos = base_bytes + chunk.get("audio_offset_bytes", 0)
++            i = bisect.bisect_left(offsets, byte_pos)
++            if i >= len(frame_map):
++                continue
++            seconds = frame_map[i][1] / sample_rate
++            wall = base_ts + chunk.get("time_offset_ms", 0)
++            if timeline and seconds <= timeline[-1][0]:
++                continue  # same spot in the audio (e.g. a chunk without sound)
++            timeline.append([round(seconds, 3), wall])
++    return timeline
 diff --git a/tests/conftest.py b/tests/conftest.py
 index cdd3ff3..3b84f90 100644
 --- a/tests/conftest.py
@@ -1427,10 +1524,10 @@ index cdd3ff3..3b84f90 100644
      status.storage_state.CopyFrom(storage)
 diff --git a/tests/test_audiocrypto.py b/tests/test_audiocrypto.py
 new file mode 100644
-index 0000000..54d1cb4
+index 0000000..81bc40d
 --- /dev/null
 +++ b/tests/test_audiocrypto.py
-@@ -0,0 +1,203 @@
+@@ -0,0 +1,225 @@
 +"""Audio encryption: the Limitless app's scheme, and never freeing what we can't read."""
 +
 +import json
@@ -1634,6 +1731,28 @@ index 0000000..54d1cb4
 +    meta = json.loads(next(tmp_path.glob("*.json")).read_text())
 +    assert meta["stars_ms"] == [1760125001234]
 +    assert len(meta["button_events"]) == 2
++
++
++def test_timeline_follows_the_clock_across_gaps():
++    from pendant.core.protocol import build_timeline
++    t0 = 1760125000000  # first stretch of speech
++    t1 = t0 + 5 * 60_000  # second stretch, 5 minutes later
++    pages = [
++        {"absolute_timestamp_ms": t0, "audio_offset_bytes": 0,
++         "chunks": [{"time_offset_ms": 0, "audio_offset_bytes": 0},
++                    {"time_offset_ms": 1000, "audio_offset_bytes": 400}]},
++        {"absolute_timestamp_ms": t1, "audio_offset_bytes": 800,
++         "chunks": [{"time_offset_ms": 0, "audio_offset_bytes": 0}]},
++    ]
++    # 40-byte frames of 320 samples (20 ms): 20 frames per page-half
++    frame_map = [(i * 40, i * 320) for i in range(40)]
++    assert build_timeline(pages, frame_map) == [[0.0, t0], [0.2, t0 + 1000], [0.4, t1]]
++
++
++def test_timeline_skips_unsynced_pages():
++    from pendant.core.protocol import build_timeline
++    pages = [{"absolute_timestamp_ms": 12345, "audio_offset_bytes": 0, "chunks": [{"time_offset_ms": 0}]}]
++    assert build_timeline(pages, [(0, 0)]) == []
 diff --git a/tests/test_protocol.py b/tests/test_protocol.py
 index ad39d00..1de6f7a 100644
 --- a/tests/test_protocol.py

@@ -195,3 +195,47 @@ def test_star_from_a_sync_without_audio_still_counts(tr, tmp_path):
     m = FakeModel({wav.name: [(30, 32, "Remember this.")]})
     tr.main([], model_factory=lambda: m)
     assert wav.with_suffix(".txt").read_text() == "★ [15:00:30] Remember this.\n"
+
+
+def test_clock_time_follows_the_timeline_across_gaps(tr, tmp_path):
+    from datetime import datetime
+    start = datetime(2026, 10, 10, 14, 1, 39)
+    later = datetime(2026, 10, 10, 14, 16, 0)  # speech resumed after a quiet stretch
+    wav = _rec(tmp_path, "20261010_140139", int(start.timestamp() * 1000))
+    meta = json.loads(wav.with_suffix(".json").read_text())
+    meta["timeline"] = [[0.0, int(start.timestamp() * 1000)], [300.0, int(later.timestamp() * 1000)]]
+    meta["stars_ms"] = [int(datetime(2026, 10, 10, 14, 16, 28).timestamp() * 1000)]
+    wav.with_suffix(".json").write_text(json.dumps(meta))
+    m = FakeModel({wav.name: [(10, 12, "Morning bit."), (312, 314, "I pressed the button right there.")]})
+    tr.main([], model_factory=lambda: m)
+    assert wav.with_suffix(".txt").read_text().splitlines() == [
+        "[14:01:49] Morning bit.",
+        "★ [14:16:12] I pressed the button right there.",
+    ]
+
+
+def test_older_recordings_estimate_from_byte_positions(tr, tmp_path):
+    from datetime import datetime
+    t0 = datetime(2026, 10, 10, 14, 0, 0)
+    t1 = datetime(2026, 10, 10, 14, 10, 0)
+    wav = _rec(tmp_path, "20261010_140000", int(t0.timestamp() * 1000))
+    _write_wav(wav, seconds=20.0)
+    meta = {"recording_start_ms": int(t0.timestamp() * 1000), "total_audio_bytes": 1000, "pages": [
+        {"absolute_timestamp_ms": int(t0.timestamp() * 1000), "audio_offset_bytes": 0,
+         "chunks": [{"time_offset_ms": 0, "audio_offset_bytes": 0}]},
+        {"absolute_timestamp_ms": int(t1.timestamp() * 1000), "audio_offset_bytes": 500,
+         "chunks": [{"time_offset_ms": 0, "audio_offset_bytes": 0}]}]}
+    wav.with_suffix(".json").write_text(json.dumps(meta))
+    m = FakeModel({wav.name: [(2, 3, "first"), (12, 13, "second")]})
+    tr.main([], model_factory=lambda: m)
+    assert wav.with_suffix(".txt").read_text().splitlines() == ["[14:00:02] first", "[14:10:02] second"]
+
+
+def test_redo_day(tr, tmp_path):
+    a = _rec(tmp_path, "20261010_090000"); a.with_suffix(".txt").write_text("old\n")
+    b = _rec(tmp_path, "20261010_100000"); b.with_suffix(".txt").write_text("old\n")
+    other = _rec(tmp_path, "20261011_090000")
+    m = FakeModel()
+    tr.main(["--redo-day", "2026-10-10"], model_factory=lambda: m)
+    assert [c[0] for c in m.calls] == [a.name, b.name]
+    assert a.with_suffix(".txt").read_text() == "(no speech found)\n"

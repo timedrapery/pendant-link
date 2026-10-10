@@ -20,7 +20,7 @@
 - `pendant download` stops once the pendant goes quiet (`--idle-timeout`, default 8 s) and can free pages afterward (`--delete-after`). It frees only after the saved files are confirmed on disk, and only through the last page in an unbroken run it received, so a gap is never deleted.
 - The docs' `protoc` command gains `-I proto`, so the generated file lands in `proto/`.
 
-It applies cleanly to upstream commit `1c71659` and passes pendant-cli's test suite (88 tests, including 11 for the freeing logic and 13 for encryption).
+It applies cleanly to upstream commit `1c71659` and passes pendant-cli's test suite (90 tests, including 11 for the freeing logic and 13 for encryption).
 
 ### Apply on the Pi
 
@@ -109,4 +109,6 @@ systemctl --user enable --now pendant-transcribe.timer
 
 **Stars.** A quick press of the pendant button marks a moment, as in the Limitless app. The press is stored with the recording, so it works even when the Pi isn't in range. Transcript lines from about 90 seconds before a press to 15 seconds after start with ★.
 
-Also: `pendant transcribe --list` (what's waiting), `--redo FILE` (transcribe one again). Settings: `PENDANT_WHISPER_MODEL` (`tiny.en` is faster, `small.en` more accurate), `PENDANT_WHISPER_BEAM` (1; higher is slower and a little more accurate). Log: `~/recordings/transcribe.log`. Tests (stand-in model): `pytest pi/tests`.
+**Clock times.** The pendant records only while it hears speech, so a recording is stretches with gaps. Each download's `.json` gets a `timeline` (seconds into the audio and the real clock time, per chunk), and transcript lines use it. Recordings synced before the timeline existed get an estimate from byte positions.
+
+Also: `pendant transcribe --list` (what's waiting), `--redo FILE` (transcribe one again), `--redo-day YYYY-MM-DD` (a whole day again). Settings: `PENDANT_WHISPER_MODEL` (`tiny.en` is faster, `small.en` more accurate), `PENDANT_WHISPER_BEAM` (1; higher is slower and a little more accurate). Log: `~/recordings/transcribe.log`. Tests (stand-in model): `pytest pi/tests`.

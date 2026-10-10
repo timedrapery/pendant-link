@@ -13,6 +13,7 @@ Run it as `pendant transcribe` (the nightly timer does), or:
     pendant transcribe --list         show what's waiting
     pendant transcribe --limit 3      do at most 3 recordings
     pendant transcribe --redo FILE    transcribe one recording again
+    pendant transcribe --redo-day 2026-10-10   transcribe a whole day again
     pendant transcribe --check FILE   loudness and how much speech is detected (numbers only)
 Settings (environment): PENDANT_WHISPER_MODEL (default base.en), PENDANT_WHISPER_THREADS (4),
 PENDANT_WHISPER_BEAM (1), PENDANT_ARCHIVE (~/recordings).
@@ -78,6 +79,45 @@ def read_wav(wav: Path):
     return np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
 
 
+def clock_for(wav: Path, duration: float):
+    """A function giving the real clock time (datetime) of a moment `t` seconds into the WAV.
+
+    The pendant records only while it hears speech, so a recording is stretches with gaps.
+    New syncs save a "timeline" (seconds into the audio -> clock time) in the .json. For
+    older ones, estimate each chunk's place from its byte position in the audio. Falls back
+    to start + t when there's nothing to go on.
+    """
+    import bisect
+
+    start = recording_start(wav)
+    anchors = []
+    try:
+        meta = json.loads(wav.with_suffix(".json").read_text())
+    except (OSError, ValueError):
+        meta = {}
+    if meta.get("timeline"):
+        anchors = [(float(s), int(ms)) for s, ms in meta["timeline"]]
+    elif meta.get("pages") and meta.get("total_audio_bytes") and duration:
+        total = meta["total_audio_bytes"]
+        for page in meta["pages"]:
+            ts, base = page.get("absolute_timestamp_ms", 0), page.get("audio_offset_bytes")
+            if ts < 1577836800000 or base is None:
+                continue
+            for chunk in page.get("chunks", []):
+                secs = (base + chunk.get("audio_offset_bytes", 0)) / total * duration
+                if not anchors or secs > anchors[-1][0]:
+                    anchors.append((secs, ts + chunk.get("time_offset_ms", 0)))
+    if not anchors:
+        return lambda t: (start + timedelta(seconds=t)) if start else None
+    keys = [a[0] for a in anchors]
+
+    def at(t):
+        i = max(bisect.bisect_right(keys, t) - 1, 0)
+        secs, ms = anchors[i]
+        return datetime.fromtimestamp(ms / 1000) + timedelta(seconds=max(t - secs, 0))
+    return at
+
+
 def stars_for(wav: Path):
     """Star times (datetimes) from every sync's metadata for that day.
 
@@ -110,8 +150,10 @@ def transcribe_one(model, wav: Path):
     """Transcribe one WAV. Returns (seconds of audio, number of speech lines)."""
     start = recording_start(wav)
     stars = stars_for(wav)
+    audio = read_wav(wav)
+    clock = clock_for(wav, len(audio) / 16000)
     segments, info = model.transcribe(
-        read_wav(wav), language="en", beam_size=BEAM, vad_filter=True,
+        audio, language="en", beam_size=BEAM, vad_filter=True,
         condition_on_previous_text=False,
     )
     lines, words = [], []
@@ -119,7 +161,7 @@ def transcribe_one(model, wav: Path):
         text = seg.text.strip()
         if not text:
             continue
-        at = (start + timedelta(seconds=seg.start)) if start else None
+        at = clock(seg.start)
         stamp = at.strftime("%H:%M:%S") if at else _clock(seg.start)
         starred = _starred(at, stars)
         lines.append(f"{STAR + ' ' if starred else ''}[{stamp}] {text}")
@@ -179,6 +221,7 @@ def main(argv=None, model_factory=load_model):
     ap.add_argument("--list", action="store_true", help="show recordings waiting for a transcript")
     ap.add_argument("--limit", type=int, default=0, help="do at most this many recordings")
     ap.add_argument("--redo", metavar="FILE", help="transcribe this recording again")
+    ap.add_argument("--redo-day", metavar="YYYY-MM-DD", help="transcribe every recording from that day again")
     ap.add_argument("--check", metavar="FILE", help="show loudness and detected speech for one recording")
     args = ap.parse_args(argv)
 
@@ -190,6 +233,10 @@ def main(argv=None, model_factory=load_model):
         if not wav.exists():
             sys.exit(f"Not found: {wav}")
         todo = [wav]
+    elif args.redo_day:
+        todo = sorted((ARCHIVE / args.redo_day).glob("pendant_*.wav"))
+        if not todo:
+            sys.exit(f"No recordings found for {args.redo_day}")
     else:
         todo = list(pending(ARCHIVE))
         if args.limit:
