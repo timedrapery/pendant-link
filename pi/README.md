@@ -404,7 +404,7 @@ That leaves your recordings (`~/recordings`) and keys (`~/.config/pendant`) alon
 
 ## What the pendant-cli patch changes
 
-`pendant-cli-fixes.patch` fixes how [pendant-cli](https://github.com/sdelcore/pendant-cli) reads the pendant and adds what this guide uses. Message layouts come from the Limitless Android app. It applies cleanly to upstream commit `1c71659` and passes pendant-cli's tests (92, including 11 for the page-freeing logic and 13 for encryption). The installer in step 6 applies it; it resets pendant-cli to its original files first, so it's safe to rerun.
+`pendant-cli-fixes.patch` fixes how [pendant-cli](https://github.com/sdelcore/pendant-cli) reads the pendant and adds what this guide uses. Message layouts come from the Limitless Android app. It applies cleanly to upstream commit `1c71659` and passes pendant-cli's tests (93, including 11 for the page-freeing logic and 13 for encryption). The installer in step 6 applies it; it resets pendant-cli to its original files first, so it's safe to rerun.
 
 **Reading the pendant correctly**
 - **Recording status** shows the real state: not recording, recording, or listening (armed to record when it hears speech), which pendant-cli used to print as `False`.

@@ -286,7 +286,7 @@ index fb98890..4c861ff 100644
  # Register command groups
  cli.add_command(bluetooth.bt)
 diff --git a/src/pendant/commands/audio.py b/src/pendant/commands/audio.py
-index cf0b2e6..36a1027 100644
+index cf0b2e6..c8c6340 100644
 --- a/src/pendant/commands/audio.py
 +++ b/src/pendant/commands/audio.py
 @@ -1,6 +1,7 @@
@@ -321,7 +321,7 @@ index cf0b2e6..36a1027 100644
      """Download stored recordings from the pendant."""
      from gi.repository import GLib
  
-@@ -28,7 +35,7 @@ def download(ctx, decode, output):
+@@ -28,13 +35,14 @@ def download(ctx, decode, output):
      # Try to load private key for decryption
      client.private_key = load_private_key()
      if client.private_key:
@@ -330,7 +330,14 @@ index cf0b2e6..36a1027 100644
  
      if not client.connect():
          raise click.ClickException("Failed to connect to device")
-@@ -42,8 +49,32 @@ def download(ctx, decode, output):
+ 
+     click.echo("\nSyncing time...")
+     client.send_command("set_current_time")
++    client.send_command("get_device_status")  # recording state and storage, for the health file
+ 
+     def start_download():
+         click.echo("\nDownloading audio (this may take a while)...")
+@@ -42,8 +50,32 @@ def download(ctx, decode, output):
          return False
  
      GLib.timeout_add_seconds(2, start_download)
@@ -355,7 +362,7 @@ index cf0b2e6..36a1027 100644
 +    try:
 +        client.run_with_timeout(max_time)
 +        _save_and_free(client, decode, output_dir, delete_after)
-+        write_health(client, output_dir)
++        write_health(client, output_dir, address)
 +    finally:
 +        client.disconnect()
 +
@@ -365,7 +372,7 @@ index cf0b2e6..36a1027 100644
  
      # Save audio
      click.echo(f"\n\nDownload complete!")
-@@ -72,26 +103,36 @@ def download(ctx, decode, output):
+@@ -72,26 +104,36 @@ def download(ctx, decode, output):
          timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
  
      opus_fname = None
@@ -408,7 +415,7 @@ index cf0b2e6..36a1027 100644
          # Check if timestamps are real (synced) or just device uptime
          first_ts = client.page_timestamps[0].get("absolute_timestamp_ms", 0) if client.page_timestamps else 0
          timestamps_synced = first_ts > MIN_VALID_TIMESTAMP_MS
-@@ -103,19 +144,48 @@ def download(ctx, decode, output):
+@@ -103,19 +145,48 @@ def download(ctx, decode, output):
              "timestamps_synced": timestamps_synced,
              "total_pages": client.page_count,
              "total_audio_bytes": len(client.opus_data),
@@ -459,11 +466,11 @@ index cf0b2e6..36a1027 100644
          except Exception as e:
              click.echo(f"Decode failed: {e}")
              click.echo(f"  Manual: pendant decode {opus_fname}")
-@@ -123,6 +193,44 @@ def download(ctx, decode, output):
+@@ -123,6 +194,48 @@ def download(ctx, decode, output):
          click.echo(f"  Decode: pendant decode {opus_fname}")
  
  
-+def write_health(client, output_dir):
++def write_health(client, output_dir, address=None):
 +    """A small status file so a morning note can say when the pendant was last seen.
 +
 +    Written to the archive root (the parent of .incoming) as pendant-health.json:
@@ -471,10 +478,14 @@ index cf0b2e6..36a1027 100644
 +    """
 +    out = Path(output_dir)
 +    root = out.parent if out.name == ".incoming" else out
++    battery = (client.last_battery or {}).get("level")
++    if battery is None and address:
++        from pendant.core.dbus_client import get_battery_from_dbus
++        battery = get_battery_from_dbus(address)  # the standard Bluetooth battery service
 +    health = {
 +        "last_sync": datetime.now().isoformat(timespec="seconds"),
 +        "pages_pulled": client.page_count,
-+        "battery_percent": (client.last_battery or {}).get("level"),
++        "battery_percent": battery,
 +        "charging": bool((client.last_battery or {}).get("charging")),
 +        "storage_used_percent": (client.last_status or {}).get("storage_used_percent"),
 +        "recording": (client.last_status or {}).get("recording_label"),
@@ -1957,10 +1968,10 @@ index 0000000..0943e9e
 +    assert result.exit_code != 0 and "install-transcribe.sh" in result.output
 diff --git a/tests/test_sync_safety.py b/tests/test_sync_safety.py
 new file mode 100644
-index 0000000..46accbd
+index 0000000..5103a06
 --- /dev/null
 +++ b/tests/test_sync_safety.py
-@@ -0,0 +1,114 @@
+@@ -0,0 +1,126 @@
 +"""Safety tests for freeing pages on the pendant after a download."""
 +import click
 +import pytest
@@ -2075,3 +2086,15 @@ index 0000000..46accbd
 +    import json as _json
 +    h = _json.loads((tmp_path / "pendant-health.json").read_text())
 +    assert h["battery_percent"] is None and h["pages_pulled"] == 0
++
++
++def test_health_asks_bluetooth_for_battery_when_pendant_did_not_say(tmp_path, monkeypatch):
++    from pendant.commands.audio import write_health
++    import pendant.core.dbus_client as dc
++    monkeypatch.setattr(dc, "get_battery_from_dbus", lambda address: 42)
++    c = FakeClient([1])
++    c.last_battery = None
++    c.last_status = {"storage_used_percent": 1.5, "recording_label": "listening"}
++    write_health(c, tmp_path, "AA:BB:CC:DD:EE:FF")
++    import json as _json
++    assert _json.loads((tmp_path / "pendant-health.json").read_text())["battery_percent"] == 42
