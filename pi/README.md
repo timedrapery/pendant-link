@@ -320,7 +320,7 @@ With the light off, `pendant status` still tells you whether it's recording.
 
 ### A morning note
 
-With readable transcripts on Drive (step 9), an AI assistant that can read your Google Drive can write you a short note each morning about the day before, starred moments first. [`morning-note.md`](morning-note.md) has a ready-made prompt to use as a daily scheduled task.
+With readable transcripts on Drive (step 9), an AI assistant that can read your Google Drive can write you a short note each morning about the day before, starred moments first, and a heads-up if the pendant hasn't synced in a day, its battery is low, or its storage is filling. [`morning-note.md`](morning-note.md) has a ready-made prompt to use as a daily scheduled task.
 
 ## 11. Browse your days
 
@@ -363,6 +363,7 @@ It prints the address to open (like `http://pendantpi.local:8765`, plus a number
 | --- | --- |
 | `~/recordings/YYYY-MM-DD/` | Each recording: `.opus` (compact audio), `.wav` (to listen to; deleted after 14 days, rebuildable), `.json` (times, stars, button presses), `.txt` (transcript), `.words.json` (transcript with exact times) |
 | `~/recordings/*.log` | Logs for sync, transcription and backup |
+| `~/recordings/pendant-health.json` | Last sync time, battery and storage, from the latest sync |
 | `~/.config/pendant/env` | Settings: your pendant's address, options |
 | `~/.config/pendant/keys/` | Your encryption keys and backup passwords. Keep a copy elsewhere. |
 | `~/.local/share/pendant/` | The sync, backup and transcription scripts, and the transcription environment |
@@ -403,7 +404,7 @@ That leaves your recordings (`~/recordings`) and keys (`~/.config/pendant`) alon
 
 ## What the pendant-cli patch changes
 
-`pendant-cli-fixes.patch` fixes how [pendant-cli](https://github.com/sdelcore/pendant-cli) reads the pendant and adds what this guide uses. Message layouts come from the Limitless Android app. It applies cleanly to upstream commit `1c71659` and passes pendant-cli's tests (90, including 11 for the page-freeing logic and 13 for encryption). The installer in step 6 applies it; it resets pendant-cli to its original files first, so it's safe to rerun.
+`pendant-cli-fixes.patch` fixes how [pendant-cli](https://github.com/sdelcore/pendant-cli) reads the pendant and adds what this guide uses. Message layouts come from the Limitless Android app. It applies cleanly to upstream commit `1c71659` and passes pendant-cli's tests (92, including 11 for the page-freeing logic and 13 for encryption). The installer in step 6 applies it; it resets pendant-cli to its original files first, so it's safe to rerun.
 
 **Reading the pendant correctly**
 - **Recording status** shows the real state: not recording, recording, or listening (armed to record when it hears speech), which pendant-cli used to print as `False`.
@@ -417,6 +418,8 @@ That leaves your recordings (`~/recordings`) and keys (`~/.config/pendant`) alon
 **Downloading safely.** `pendant download` stops once the pendant goes quiet (`--idle-timeout`) and can free pages afterwards (`--delete-after`): only after the files are confirmed on disk, only through the end of an unbroken run, and never if any audio couldn't be decrypted.
 
 **New commands:** `pendant sync`, `pendant backup`, `pendant transcribe` (which run the scripts in this folder), and `pendant led`.
+
+**Health file.** Each sync writes `~/recordings/pendant-health.json`: when it last synced, battery, storage. Nothing about what was said. With readable transcripts on, it goes to Drive too, so a morning note can mention a pendant that hasn't synced in a day or a low battery.
 
 **Stars and clock times.** Button presses stored in the recording come through with their own clock time (`button_events` and `stars_ms` in each download's `.json`). Decoding saves a `timeline` that ties positions in the audio to the real time of day, since the pendant records only while it hears speech; transcripts use it.
 

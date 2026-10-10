@@ -38,6 +38,7 @@ if [ "${PENDANT_TRANSCRIPTS_TO_DRIVE:-}" = "yes" ]; then
     --filter "- .incoming/**" \
     --filter "+ */" \
     --filter "+ pendant_*.txt" \
+    --filter "+ /pendant-health.json" \
     --filter "- *" \
     --stats-one-line --stats 60s -v || { log "Copying transcripts failed; will try again tomorrow."; exit 1; }
   log "Transcripts done."

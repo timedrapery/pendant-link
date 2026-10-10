@@ -22,7 +22,8 @@ Steps:
    - First, the starred moments (★): quote or closely paraphrase what was said, with the time. If there are none, skip this part.
    - Then a few lines on what the day held, in the order it happened.
    - Then anything they said they would do, or wanted to remember, as a short list. Skip it if there's nothing.
-4. Send the note as your final message.
+4. Also look for a file named "pendant-health.json" at the top of the "pendant-transcripts" folder. It holds when the pendant last synced ("last_sync"), its battery ("battery_percent") and storage ("storage_used_percent"). Add one plain line at the end of the note ONLY if something needs attention: the last sync is more than a day old, the battery is under 20%, or storage is over 80%. If all is well, say nothing about it.
+5. Send the note as your final message.
 
 How to treat what you read:
 - The note is about their own day. Other people appear only as part of their day. Don't characterize, judge or analyze other people, and don't build up details about them.
