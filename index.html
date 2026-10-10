@@ -177,6 +177,7 @@ a{color:var(--accent)}
   </p>
 </div>
 
+<script src="protocol.js"></script>
 <script>
 "use strict";
 (function(){
@@ -193,111 +194,66 @@ a{color:var(--accent)}
   const logEl=$("log");
 
   let device=null, server=null, ctrlChar=null, dataChar=null;
-  let msgIndex=0, reqId=0, connecting=false;
+  let msgIndex=0, reqId=0, connecting=false, battChar=null;
   const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-  const frags={}; // reassembly by message index
 
   // ---------- logging ----------
   function log(kind,msg){
     const line=document.createElement("div");
     line.className="logline "+(kind||"");
-    const t=new Date().toLocaleTimeString();
-    line.innerHTML='<span class="t">'+t+'</span>  '+msg;
+    const t=document.createElement("span");
+    t.className="t";
+    t.textContent=new Date().toLocaleTimeString();
+    line.appendChild(t);
+    line.appendChild(document.createTextNode("  "+String(msg))); // text only: device names and errors can't inject markup
     logEl.appendChild(line);
     logEl.scrollTop=logEl.scrollHeight;
   }
   const hex=u8=>Array.from(u8,b=>b.toString(16).padStart(2,"0")).join(" ");
 
-  // ---------- tiny protobuf writer ----------
-  function varint(n){const o=[];while(n>127){o.push((n&0x7f)|0x80);n=Math.floor(n/128);}o.push(n);return o;}
-  const tag=(num,wire)=>varint((num<<3)|wire);
-  const lenField=(num,arr)=>[...tag(num,2),...varint(arr.length),...arr];
-  const vField=(num,val)=>[...tag(num,0),...varint(val)];
+  // ---------- protocol (protocol.js) ----------
+  const P=window.PendantProtocol;
+  const reassembler=new P.Reassembler({maxFragments:64,maxPending:8});
+  const nextCommand=cmd=>P.encodeCommand(cmd,msgIndex++,++reqId);
 
-  function buildCommand(cmdField){
-    reqId++;
-    const requestData=vField(1,reqId);              // RequestData{ request_id }
-    const cmd=[...lenField(cmdField,[]),...lenField(30,requestData)]; // ServerCommandMsg
-    const env=[...vField(1,msgIndex++),...vField(2,0),...vField(3,1),...lenField(4,cmd)];
-    return new Uint8Array(env);
-  }
-
-  // ---------- tiny protobuf reader ----------
-  function readVarint(b,i){let shift=0,res=0,byte;do{byte=b[i++];res+=(byte&0x7f)*Math.pow(2,shift);shift+=7;}while(byte&0x80);return[res,i];}
-  function parseFields(b){
-    const f={};let i=0;
-    while(i<b.length){
-      let tg;[tg,i]=readVarint(b,i);
-      const num=tg>>>3,wire=tg&7;let val;
-      if(wire===0){[val,i]=readVarint(b,i);}
-      else if(wire===2){let len;[len,i]=readVarint(b,i);val=b.slice(i,i+len);i+=len;}
-      else if(wire===5){val=b.slice(i,i+4);i+=4;}
-      else if(wire===1){val=b.slice(i,i+8);i+=8;}
-      else break;
-      (f[num]=f[num]||[]).push(val);
+  // ---------- render decoded messages ----------
+  function render(msg){
+    if(msg.deviceInfo){
+      $("vFirmware").textContent="fw "+msg.deviceInfo.firmware;
+      $("nFirmware").textContent="serial "+msg.deviceInfo.serial;
+      log("ok","device info: firmware "+msg.deviceInfo.firmware);
     }
-    return f;
-  }
-  const first=(f,n)=>f[n]&&f[n][0];
-  const asStr=u8=>{try{return new TextDecoder().decode(u8);}catch(e){return "";}};
-
-  // ---------- interpret a PendantAllMsg ----------
-  const BTN={0:"none",1:"short press",2:"long press",3:"double press",4:"short + super-long press"};
-  const REC={0:"idle",1:"recording",2:"listening"};
-  const BAT={0:"unknown",1:"charging",2:"on battery",3:"not charging",4:"full"};
-  const USB={0:"unknown",1:"unplugged",2:"plugged in"};
-
-  function handleMessage(payload){
-    const f=parseFields(payload);
-    // DeviceInfoMsg (field 1)
-    if(f[1]){
-      const d=parseFields(f[1][0]);
-      const fw=d[3]?asStr(d[3][0]):"?";
-      const serialBytes=d[2]&&d[2][0];
-      const serial=serialBytes?(typeof serialBytes==="object"?asStr(serialBytes):serialBytes):"?";
-      $("vFirmware").textContent="fw "+fw;
-      $("nFirmware").textContent="serial "+(serial||"?");
-      log("ok","device info: firmware "+fw);
-    }
-    // DeviceStatus (field 5)
-    if(f[5]){
-      const s=parseFields(f[5][0]);
-      if(s[7]){const r=parseFields(s[7][0]);const st=first(r,1)||0;setState(REC[st]||"unknown",st);}
-      if(s[5]){
-        const ss=parseFields(s[5][0]);
-        const free=first(ss,4)||0,total=first(ss,5)||0;
-        if(total>0){const used=Math.round((total-free)/total*100);
-          $("vStorage").innerHTML=used+'<small>%</small>';
-          $("nStorage").textContent=(total-free)+" of "+total+" pages";}
+    if(msg.status){
+      const st=msg.status;
+      if(st.recording) setState(st.recording.label,st.recording.code);
+      if(st.storage){
+        $("vStorage").textContent=st.storage.percent;
+        const pct=document.createElement("small");pct.textContent="%";$("vStorage").appendChild(pct);
+        $("nStorage").textContent=st.storage.used+" of "+st.storage.total+" pages";
       }
-      if(s[1]){
-        const w=parseFields(s[1][0]);const conn=first(w,1)||0;const ssid=w[2]?asStr(w[2][0]):"";
-        setPill("pWifi",conn?"connected":"off",conn?"good":"");
-        $("nWifi").textContent=conn&&ssid?ssid:"On-device radio";
+      if(st.wifi){
+        setPill("pWifi",st.wifi.connected?"connected":"off",st.wifi.connected?"good":"");
+        $("nWifi").textContent=st.wifi.connected&&st.wifi.ssid?st.wifi.ssid:"On-device radio";
       }
-      if(s[9]) battFromStatus(parseFields(s[9][0]));
+      if(st.battery) renderBattery(st.battery);
       log("ok","status received");
     }
-    // BatteryStatus (field 7)
-    if(f[7]) battFromStatus(parseFields(f[7][0]));
-    // ButtonStatus (field 8)
-    if(f[8]){
-      const b=parseFields(f[8][0]);const ev=first(b,1)||0;
-      $("vButton").textContent=(BTN[ev]||"event "+ev)+"  ·  "+new Date().toLocaleTimeString();
+    if(msg.battery) renderBattery(msg.battery);
+    if(msg.button){
+      $("vButton").textContent=msg.button.label+"  ·  "+new Date().toLocaleTimeString();
       flashButton();
-      log("ok","button: "+(BTN[ev]||ev));
+      log("ok","button: "+msg.button.label);
     }
   }
-  function battFromStatus(b){
-    const soc=first(b,5),state=first(b,1)||0,usb=first(b,9)||0;
-    if(soc!=null){$("vBattery").textContent=soc+"%";}
-    const bits=[];if(state)bits.push(BAT[state]||"");if(usb===2)bits.push("USB");
-    $("nBattery").textContent=bits.filter(Boolean).join(" · ")||"Battery level";
+  function renderBattery(b){
+    if(b.percent!=null) $("vBattery").textContent=b.percent+"%";
+    const bits=[];if(b.state!=="unknown")bits.push(b.state);if(b.usbConnected)bits.push("USB");
+    $("nBattery").textContent=bits.join(" · ")||"Battery level";
   }
   function setState(label,code){
-    $("pState").textContent=label;
-    $("pState").className="pill "+(code===1?"bad":code===2?"good":"");
-    $("vState").innerHTML="";$("vState").appendChild($("pState"));
+    const p=$("pState");
+    p.textContent=label;
+    p.className="pill "+(code===1?"bad":code===2?"good":"");
   }
   function setPill(id,label,cls){const p=$(id);p.textContent=label;p.className="pill "+(cls||"");}
   let flashTimer=null;
@@ -305,21 +261,15 @@ a{color:var(--accent)}
 
   // ---------- BLE notify handling ----------
   function onNotify(ev){
-    const v=new Uint8Array(ev.target.value.buffer);
+    const dv=ev.target.value;
+    const v=new Uint8Array(dv.buffer,dv.byteOffset,dv.byteLength);
     log("rx","rx "+hex(v));
-    const env=parseFields(v);
-    const idx=first(env,1)||0, seq=first(env,2)||0, num=first(env,3)||1, payload=first(env,4);
-    if(!payload)return;
-    if(num===1){ try{handleMessage(payload);}catch(e){log("err","decode error: "+e.message);} return; }
-    // reassemble multi-fragment
-    frags[idx]=frags[idx]||new Array(num).fill(null);
-    frags[idx][seq]=payload;
-    if(frags[idx].every(x=>x)){
-      const full=new Uint8Array(frags[idx].reduce((a,p)=>a+p.length,0));
-      let o=0;frags[idx].forEach(p=>{full.set(p,o);o+=p.length;});
-      delete frags[idx];
-      try{handleMessage(full);}catch(e){log("err","decode error: "+e.message);}
-    }
+    let full;
+    try{ full=reassembler.push(P.parseEnvelope(v)); }
+    catch(e){ log("err","dropped packet: "+e.message); return; }
+    if(!full) return;                                   // more fragments coming
+    try{ render(P.decodePendantMessage(full)); }
+    catch(e){ log("err","decode error: "+e.message); }
   }
 
   // ---------- commands ----------
@@ -333,10 +283,11 @@ a{color:var(--accent)}
     }
   }
   async function readAll(){
-    await send(buildCommand(21),"GetDeviceStatus");
-    await send(buildCommand(14),"GetDeviceInfo");
+    await send(nextCommand(P.COMMANDS.GET_DEVICE_STATUS),"GetDeviceStatus");
+    await send(nextCommand(P.COMMANDS.GET_DEVICE_INFO),"GetDeviceInfo");
     await readBattery();
   }
+  function onBattery(e){ $("vBattery").textContent=e.target.value.getUint8(0)+"%"; }
   async function readBattery(){
     try{
       const svc=await server.getPrimaryService(BATT_SVC);
@@ -345,8 +296,11 @@ a{color:var(--accent)}
       const lvl=v.getUint8(0);
       $("vBattery").textContent=lvl+"%";
       log("ok","battery service: "+lvl+"%");
-      try{ await ch.startNotifications(); ch.addEventListener("characteristicvaluechanged",e=>{
-        $("vBattery").textContent=e.target.value.getUint8(0)+"%";});}catch(e){}
+      if(battChar!==ch){                       // subscribe once per connection, not on every refresh
+        battChar=ch;
+        try{ await ch.startNotifications();
+          ch.addEventListener("characteristicvaluechanged",onBattery); }catch(e){}
+      }
     }catch(e){ log("err","battery service unavailable: "+e.message); }
   }
 
@@ -406,7 +360,8 @@ a{color:var(--accent)}
     if(connecting) return;
     setStatus("","Disconnected","Tap connect to reconnect.");
     bConnect.disabled=false;bRefresh.disabled=true;bDisc.disabled=true;
-    ctrlChar=dataChar=server=null;
+    ctrlChar=dataChar=server=battChar=null;
+    reassembler.reset();
     log("","disconnected");
   }
   function disconnect(){ if(device&&device.gatt.connected)device.gatt.disconnect(); }
@@ -414,7 +369,7 @@ a{color:var(--accent)}
   // ---------- Web Bluetooth availability ----------
   function ctxFail(){
     const b=$("ctxBanner");b.hidden=false;b.className="banner bad";
-    b.innerHTML="<b>Web Bluetooth isn’t available in this view.</b> This test needs Chrome on Android with the page opened at its own address (not embedded). If it stays unavailable here, the next step is hosting it on GitHub Pages — I can set that up.";
+    b.innerHTML="<b>Web Bluetooth isn’t available in this view.</b> This test needs Chrome on Android with the page opened at its own address (not embedded). Open it at timedrapery.github.io/pendant-link in Chrome.";
     bConnect.disabled=true;
     setStatus("err","Unavailable","No Bluetooth access in this context.");
   }
