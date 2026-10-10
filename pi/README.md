@@ -11,11 +11,12 @@
 - **Wi-Fi status** uses the real layout (state, signal, uptime, network name).
 - Status updates that leave out the recording state no longer print "unknown".
 - `pendant info` waits for the pendant's reply (asking again once if needed, up to 10 seconds) instead of giving up after 3.
+- New `pendant sync` command runs the automatic sync below.
 - Messages that fail to decode are printed instead of silently dropped.
 - `pendant download` stops once the pendant goes quiet (`--idle-timeout`, default 8 s) and can free pages afterward (`--delete-after`). It frees only after the saved files are confirmed on disk, and only through the last page in an unbroken run it received, so a gap is never deleted.
 - The docs' `protoc` command gains `-I proto`, so the generated file lands in `proto/`.
 
-It applies cleanly to upstream commit `1c71659` and passes pendant-cli's test suite (66 tests, including 11 for the freeing logic).
+It applies cleanly to upstream commit `1c71659` and passes pendant-cli's test suite (68 tests, including 11 for the freeing logic).
 
 ### Apply on the Pi
 
@@ -33,7 +34,7 @@ To undo: `cd ~/pendant-cli && git checkout -- . && protoc -I proto --python_out=
 
 ## Automatic sync
 
-`pendant-sync` pulls new recordings, files them in `~/recordings/YYYY-MM-DD/`, and frees only the pages it saved. If the pendant is out of range it skips quietly, and only one sync runs at a time. The timer runs it every 15 minutes.
+`pendant sync` pulls new recordings, files them in `~/recordings/YYYY-MM-DD/`, and frees only the pages it saved. If the pendant is out of range it skips quietly, and only one sync runs at a time. The timer runs it every 15 minutes.
 
 Install (applies the patch above too; doesn't start the timer):
 
@@ -42,7 +43,7 @@ export PENDANT_ADDRESS=AA:BB:CC:DD:EE:FF
 curl -fsSL https://raw.githubusercontent.com/timedrapery/pendant-link/main/pi/install-sync.sh | bash -s main
 ```
 
-Run `pendant-sync` once by hand and check `~/recordings`, then turn on the timer:
+Run `pendant sync` once by hand and check `~/recordings`, then turn on the timer:
 
 ```
 systemctl --user enable --now pendant-sync.timer

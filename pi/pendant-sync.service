@@ -5,6 +5,6 @@ After=bluetooth.target
 [Service]
 Type=oneshot
 EnvironmentFile=%h/.config/pendant/env
-ExecStart=%h/.local/bin/pendant-sync
+ExecStart=/bin/sh -c 'exec "$PENDANT_BIN" sync'
 TimeoutStartSec=25min
 Nice=10

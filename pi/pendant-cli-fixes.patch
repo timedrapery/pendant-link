@@ -142,6 +142,27 @@ index 22b2dea..52cb2dc 100644
  }
  
  message BleStatus {
+diff --git a/src/pendant/cli.py b/src/pendant/cli.py
+index fb98890..e3228ea 100644
+--- a/src/pendant/cli.py
++++ b/src/pendant/cli.py
+@@ -19,7 +19,7 @@ def cli(ctx, address, verbose):
+ 
+ 
+ # Import and register command groups
+-from pendant.commands import device, audio, bluetooth, crypto, explore, debug, settings
++from pendant.commands import device, audio, bluetooth, crypto, explore, debug, settings, sync
+ 
+ # Register individual commands
+ cli.add_command(device.status)
+@@ -30,6 +30,7 @@ cli.add_command(audio.decode)
+ cli.add_command(audio.record)
+ cli.add_command(audio.stop)
+ cli.add_command(audio.clear)
++cli.add_command(sync.sync)
+ 
+ # Register command groups
+ cli.add_command(bluetooth.bt)
 diff --git a/src/pendant/commands/audio.py b/src/pendant/commands/audio.py
 index cf0b2e6..0e71f17 100644
 --- a/src/pendant/commands/audio.py
@@ -330,6 +351,38 @@ index e05b050..35c65ab 100644
          elif rtype and rtype != "parse_error":
              click.echo(f"[{timestamp}] Event: {rtype}")
  
+diff --git a/src/pendant/commands/sync.py b/src/pendant/commands/sync.py
+new file mode 100644
+index 0000000..7477f34
+--- /dev/null
++++ b/src/pendant/commands/sync.py
+@@ -0,0 +1,26 @@
++"""`pendant sync`: pull new recordings, file them by date, free only what was saved.
++
++Runs the sync script that install-sync.sh puts in ~/.local/share/pendant/.
++"""
++
++import os
++from pathlib import Path
++
++import click
++
++DEFAULT_SCRIPT = Path.home() / ".local" / "share" / "pendant" / "pendant-sync"
++
++
++@click.command()
++@click.pass_context
++def sync(ctx):
++    """Pull new recordings into ~/recordings/<date>/ and free them on the pendant."""
++    script = Path(os.environ.get("PENDANT_SYNC_SCRIPT", DEFAULT_SCRIPT))
++    if not script.is_file():
++        raise click.ClickException(
++            f"Sync isn't installed ({script} is missing). Run install-sync.sh first."
++        )
++    env = dict(os.environ)
++    if ctx.obj.get("address"):
++        env["PENDANT_ADDRESS"] = ctx.obj["address"]
++    os.execve(str(script), [str(script)], env)
 diff --git a/src/pendant/core/bleak_client.py b/src/pendant/core/bleak_client.py
 index 5278f23..ca072c2 100644
 --- a/src/pendant/core/bleak_client.py
@@ -718,6 +771,40 @@ index ad39d00..822bfc5 100644
 +    assert not any("Serial" in l for l in lines)
 +    lines = format_device_info_lines({"firmware_version": "1.1.20", "serial_number": "PND-1", "device_id": 7})
 +    assert any("Serial: PND-1" in l for l in lines)
+diff --git a/tests/test_sync_command.py b/tests/test_sync_command.py
+new file mode 100644
+index 0000000..96dfbc7
+--- /dev/null
++++ b/tests/test_sync_command.py
+@@ -0,0 +1,28 @@
++"""`pendant sync` hands off to the installed sync script."""
++
++import os
++import stat
++
++from click.testing import CliRunner
++
++from pendant.cli import cli
++
++
++def test_sync_missing_script(tmp_path, monkeypatch):
++    monkeypatch.setenv("PENDANT_SYNC_SCRIPT", str(tmp_path / "nope"))
++    result = CliRunner().invoke(cli, ["sync"])
++    assert result.exit_code != 0
++    assert "isn't installed" in result.output
++
++
++def test_sync_runs_script_with_address(tmp_path, monkeypatch):
++    script = tmp_path / "pendant-sync"
++    script.write_text("#!/bin/sh\n")
++    script.chmod(script.stat().st_mode | stat.S_IEXEC)
++    monkeypatch.setenv("PENDANT_SYNC_SCRIPT", str(script))
++    calls = []
++    monkeypatch.setattr(os, "execve", lambda path, argv, env: calls.append((path, env)))
++    result = CliRunner().invoke(cli, ["-a", "C2:72:BC:F1:88:3F", "sync"])
++    assert result.exit_code == 0, result.output
++    assert calls[0][0] == str(script)
++    assert calls[0][1]["PENDANT_ADDRESS"] == "C2:72:BC:F1:88:3F"
 diff --git a/tests/test_sync_safety.py b/tests/test_sync_safety.py
 new file mode 100644
 index 0000000..9c21660

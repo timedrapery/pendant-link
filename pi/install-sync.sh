@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Installs pendant-sync and its timer, and applies the pendant-cli fixes it depends on.
 # Usage (on the Pi): curl -sL <raw URL of this file> | bash -s <commit>
-# Does not start the timer. Run `pendant-sync` once by hand first, then enable the timer.
+# Does not start the timer. Run `pendant sync` once by hand first, then enable the timer.
 set -euo pipefail
 
 REF="${1:-main}"
@@ -19,6 +19,12 @@ if [ ! -d "$HOME/pendant-cli/.git" ]; then
   exit 1
 fi
 
+PENDANT_BIN="$(command -v pendant || true)"
+if [ -z "$PENDANT_BIN" ]; then
+  echo "Can't find the pendant command. Make sure 'pendant status' works in this shell, then rerun."
+  exit 1
+fi
+
 say "Applying pendant-cli fixes ($REF)"
 cd "$HOME/pendant-cli"
 git checkout -- .
@@ -26,13 +32,14 @@ curl -fsSL "$BASE/pendant-cli-fixes.patch" | git apply
 protoc -I proto --python_out=proto proto/pendant.proto
 cd "$HOME"
 
-say "Installing pendant-sync"
-mkdir -p "$HOME/.local/bin" "$HOME/.config/pendant" "$HOME/.config/systemd/user" "$HOME/recordings"
-curl -fsSL "$BASE/pendant-sync" -o "$HOME/.local/bin/pendant-sync"
-chmod +x "$HOME/.local/bin/pendant-sync"
+say "Installing pendant sync"
+mkdir -p "$HOME/.local/share/pendant" "$HOME/.config/pendant" "$HOME/.config/systemd/user" "$HOME/recordings"
+curl -fsSL "$BASE/pendant-sync" -o "$HOME/.local/share/pendant/pendant-sync"
+chmod +x "$HOME/.local/share/pendant/pendant-sync"
+rm -f "$HOME/.local/bin/pendant-sync"   # older installs put it here
 curl -fsSL "$BASE/pendant-sync.service" -o "$HOME/.config/systemd/user/pendant-sync.service"
 curl -fsSL "$BASE/pendant-sync.timer" -o "$HOME/.config/systemd/user/pendant-sync.timer"
-echo "PENDANT_ADDRESS=$ADDRESS" > "$HOME/.config/pendant/env"
+printf "PENDANT_ADDRESS=%s\nPENDANT_BIN=%s\n" "$ADDRESS" "$PENDANT_BIN" > "$HOME/.config/pendant/env"
 systemctl --user daemon-reload
 
-say "Installed. Next: run 'pendant-sync' once by hand and check ~/recordings."
+say "Installed. Next: run 'pendant sync' once by hand and check ~/recordings."

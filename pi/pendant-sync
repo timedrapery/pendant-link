@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
 # Pull new recordings off the pendant, file them by date, and free only those pages on the pendant.
-# Runs from the pendant-sync timer every 15 minutes, or by hand: pendant-sync
+# Run it as `pendant sync`; the pendant-sync timer does that every 15 minutes.
 set -euo pipefail
 
-PENDANT="${PENDANT_BIN:-$HOME/.local/bin/pendant}"
+# Settings saved by install-sync.sh; anything already set in the shell wins.
+if [ -f "$HOME/.config/pendant/env" ]; then
+  saved_address=$(sed -n 's/^PENDANT_ADDRESS=//p' "$HOME/.config/pendant/env")
+  saved_bin=$(sed -n 's/^PENDANT_BIN=//p' "$HOME/.config/pendant/env")
+  PENDANT_ADDRESS="${PENDANT_ADDRESS:-$saved_address}"
+  PENDANT_BIN="${PENDANT_BIN:-$saved_bin}"
+  export PENDANT_ADDRESS
+fi
+PENDANT="${PENDANT_BIN:-$(command -v pendant || echo "$HOME/.local/bin/pendant")}"
 ARCHIVE="${PENDANT_ARCHIVE:-$HOME/recordings}"
 INCOMING="$ARCHIVE/.incoming"
 export PYTHONUNBUFFERED=1
