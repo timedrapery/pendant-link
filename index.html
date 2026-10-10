@@ -119,6 +119,7 @@ a{color:var(--accent)}
     </div>
     <div class="btnrow">
       <button class="act" id="connect" type="button">Connect</button>
+      <button class="act ghost" id="scanall" type="button">Show all devices</button>
       <button class="act ghost" id="refresh" type="button" disabled>Read status</button>
       <button class="act ghost" id="disconnect" type="button" disabled>Disconnect</button>
     </div>
@@ -354,14 +355,15 @@ a{color:var(--accent)}
     statusText.textContent=text;
     if(sub!=null)statusSub.textContent=sub;
   }
-  async function connect(){
+  async function connect(all){
     if(!navigator.bluetooth){ ctxFail(); return; }
     try{
-      setStatus("busy","Requesting device…","Pick “Pendant” from the browser’s list.");
-      device=await navigator.bluetooth.requestDevice({
-        filters:[{services:[SVC]},{namePrefix:"Pendant"}],
-        optionalServices:[SVC,BATT_SVC]
-      });
+      $("ctxBanner").hidden=true;
+      setStatus("busy","Requesting device…",all?"Pick your pendant from the full list.":"Pick “Pendant” from the browser’s list.");
+      const opts=all
+        ? {acceptAllDevices:true,optionalServices:[SVC,BATT_SVC]}
+        : {filters:[{services:[SVC]},{namePrefix:"Pendant"}],optionalServices:[SVC,BATT_SVC]};
+      device=await navigator.bluetooth.requestDevice(opts);
       device.addEventListener("gattserverdisconnected",onDisconnect);
       log("","selected: "+(device.name||"unnamed")+" ("+device.id+")");
       setStatus("busy","Connecting…","Bonding may prompt you on first connect.");
@@ -376,7 +378,11 @@ a{color:var(--accent)}
       bConnect.disabled=true;bRefresh.disabled=false;bDisc.disabled=false;
       await readAll();
     }catch(e){
-      if(e&&e.name==="NotFoundError"){ setStatus("","Not connected","No device picked."); }
+      if(e&&e.name==="NotFoundError"){
+        setStatus("","Not connected","No device selected or none found.");
+        const b=$("ctxBanner");b.hidden=false;b.className="banner";
+        b.innerHTML="<b>No pendant in the list?</b> Tap the pendant to wake it · fully close the Limitless app (swipe it away from recents) · turn phone Location ON (Android needs it to scan Bluetooth) · then try again.";
+      }
       else{ setStatus("err","Connection failed",e.message); log("err",e.name+": "+e.message); }
     }
   }
@@ -416,7 +422,8 @@ a{color:var(--accent)}
   });
   function flash(btn,txt){const o=btn.textContent;btn.textContent=txt;setTimeout(()=>btn.textContent=o,1200);}
 
-  bConnect.addEventListener("click",connect);
+  bConnect.addEventListener("click",()=>connect(false));
+  $("scanall").addEventListener("click",()=>connect(true));
   bRefresh.addEventListener("click",readAll);
   bDisc.addEventListener("click",disconnect);
 
