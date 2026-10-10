@@ -250,7 +250,7 @@ index aae62ae..0924185 100644
  ]
  
 diff --git a/src/pendant/cli.py b/src/pendant/cli.py
-index fb98890..0c86086 100644
+index fb98890..ea3eee3 100644
 --- a/src/pendant/cli.py
 +++ b/src/pendant/cli.py
 @@ -19,7 +19,7 @@ def cli(ctx, address, verbose):
@@ -262,12 +262,13 @@ index fb98890..0c86086 100644
  
  # Register individual commands
  cli.add_command(device.status)
-@@ -30,6 +30,8 @@ cli.add_command(audio.decode)
+@@ -30,6 +30,9 @@ cli.add_command(audio.decode)
  cli.add_command(audio.record)
  cli.add_command(audio.stop)
  cli.add_command(audio.clear)
 +cli.add_command(sync.sync)
 +cli.add_command(sync.backup)
++cli.add_command(sync.transcribe)
  
  # Register command groups
  cli.add_command(bluetooth.bt)
@@ -686,15 +687,16 @@ index e05b050..35c65ab 100644
  
 diff --git a/src/pendant/commands/sync.py b/src/pendant/commands/sync.py
 new file mode 100644
-index 0000000..8b18ee9
+index 0000000..9fe237a
 --- /dev/null
 +++ b/src/pendant/commands/sync.py
-@@ -0,0 +1,41 @@
+@@ -0,0 +1,55 @@
 +"""`pendant sync` and `pendant backup`: run the scripts install-sync.sh / install-backup.sh
 +put in ~/.local/share/pendant/.
 +
-+sync:   pull new recordings, file them by date, free only what was saved.
-+backup: copy ~/recordings to Google Drive, encrypted on the Pi first.
++sync:       pull new recordings, file them by date, free only what was saved.
++backup:     copy ~/recordings to Google Drive, encrypted on the Pi first.
++transcribe: turn recordings into text on this computer (faster-whisper).
 +"""
 +
 +import os
@@ -731,6 +733,19 @@ index 0000000..8b18ee9
 +    """Copy ~/recordings to Google Drive, encrypted on this computer first."""
 +    script = Path(os.environ.get("PENDANT_BACKUP_SCRIPT", SCRIPTS_DIR / "pendant-backup"))
 +    _run_script(ctx, script, "install-backup.sh")
++
++
++@click.command(context_settings={"ignore_unknown_options": True, "allow_extra_args": True,
++                                 "help_option_names": []})
++@click.argument("args", nargs=-1, type=click.UNPROCESSED)
++@click.pass_context
++def transcribe(ctx, args):
++    """Turn recordings into text on this computer (try: pendant transcribe --help)."""
++    python = Path(os.environ.get("PENDANT_WHISPER_PYTHON", SCRIPTS_DIR / "whisper-venv" / "bin" / "python"))
++    script = Path(os.environ.get("PENDANT_TRANSCRIBE_SCRIPT", SCRIPTS_DIR / "pendant-transcribe.py"))
++    if not (python.is_file() and script.is_file()):
++        raise click.ClickException("Transcription isn't installed. Run install-transcribe.sh first.")
++    os.execv(str(python), [str(python), str(script), *args])
 diff --git a/src/pendant/core/audiocrypto.py b/src/pendant/core/audiocrypto.py
 new file mode 100644
 index 0000000..536d62c
@@ -1554,10 +1569,10 @@ index ad39d00..822bfc5 100644
 +    assert any("Serial: PND-1" in l for l in lines)
 diff --git a/tests/test_sync_command.py b/tests/test_sync_command.py
 new file mode 100644
-index 0000000..5d301b2
+index 0000000..01e90d2
 --- /dev/null
 +++ b/tests/test_sync_command.py
-@@ -0,0 +1,40 @@
+@@ -0,0 +1,60 @@
 +"""`pendant sync` hands off to the installed sync script."""
 +
 +import os
@@ -1598,6 +1613,26 @@ index 0000000..5d301b2
 +    result = CliRunner().invoke(cli, ["backup"])
 +    assert result.exit_code == 0, result.output
 +    assert calls == [str(script)]
++
++
++def test_transcribe_passes_its_options_through(tmp_path, monkeypatch):
++    py, script = tmp_path / "python", tmp_path / "pendant-transcribe.py"
++    py.write_text(""); script.write_text("")
++    monkeypatch.setenv("PENDANT_WHISPER_PYTHON", str(py))
++    monkeypatch.setenv("PENDANT_TRANSCRIBE_SCRIPT", str(script))
++    calls = []
++    monkeypatch.setattr(os, "execv", lambda path, argv: calls.append(argv))
++    for extra in (["--limit", "1"], ["--help"], []):
++        calls.clear()
++        result = CliRunner().invoke(cli, ["transcribe", *extra])
++        assert result.exit_code == 0, result.output
++        assert calls == [[str(py), str(script), *extra]]
++
++
++def test_transcribe_not_installed(tmp_path, monkeypatch):
++    monkeypatch.setenv("PENDANT_WHISPER_PYTHON", str(tmp_path / "nope"))
++    result = CliRunner().invoke(cli, ["transcribe"])
++    assert result.exit_code != 0 and "install-transcribe.sh" in result.output
 diff --git a/tests/test_sync_safety.py b/tests/test_sync_safety.py
 new file mode 100644
 index 0000000..9c21660

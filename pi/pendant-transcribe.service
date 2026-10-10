@@ -1,0 +1,10 @@
+[Unit]
+Description=Transcribe pendant recordings on this computer
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/pendant/env
+ExecStart=/bin/sh -c 'exec "$PENDANT_BIN" transcribe >> "$HOME/recordings/transcribe.log" 2>&1'
+TimeoutStartSec=6h
+Nice=19
+IOSchedulingClass=idle

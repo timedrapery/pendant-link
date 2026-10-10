@@ -18,7 +18,7 @@
 - `pendant download` stops once the pendant goes quiet (`--idle-timeout`, default 8 s) and can free pages afterward (`--delete-after`). It frees only after the saved files are confirmed on disk, and only through the last page in an unbroken run it received, so a gap is never deleted.
 - The docs' `protoc` command gains `-I proto`, so the generated file lands in `proto/`.
 
-It applies cleanly to upstream commit `1c71659` and passes pendant-cli's test suite (81 tests, including 11 for the freeing logic and 13 for encryption).
+It applies cleanly to upstream commit `1c71659` and passes pendant-cli's test suite (84 tests, including 11 for the freeing logic and 13 for encryption).
 
 ### Apply on the Pi
 
@@ -89,3 +89,18 @@ curl -fsSL https://raw.githubusercontent.com/timedrapery/pendant-link/main/pi/in
 Open the link it prints, sign in, and click Allow. Then run `pendant backup` once by hand, and turn on the timer: `systemctl --user enable --now pendant-backup.timer`. Log: `~/recordings/backup.log`.
 
 The backup's passwords are in `~/.config/pendant/keys/backup-crypt.txt`. Keep a copy off the Pi with your audio key; without them the backup can't be read. To restore: set up rclone with the same token and passwords, then `rclone copy pendant-backup: ~/recordings`.
+
+## Transcripts made on the Pi
+
+`pendant transcribe` turns recordings into text with [faster-whisper](https://github.com/SYSTRAN/faster-whisper), entirely on the Pi: no audio or text goes to any service. For each recording in `~/recordings/YYYY-MM-DD/` it writes a `.txt` with one line per stretch of speech, stamped with the clock time (`[12:45:31] ...`), and a `.words.json` with the same plus start and end times. Recordings with no speech get a `.txt` saying so. A timer runs it nightly at about 1:07. The nightly backup picks up the transcripts too, encrypted like everything else.
+
+It runs in its own Python environment (`~/.local/share/pendant/whisper-venv`), uses the `base.en` model (about 150 MB, downloaded once), and runs at low priority so syncing isn't held up.
+
+```
+curl -fsSL https://raw.githubusercontent.com/timedrapery/pendant-link/main/pi/install-sync.sh | bash -s main
+curl -fsSL https://raw.githubusercontent.com/timedrapery/pendant-link/main/pi/install-transcribe.sh | bash -s main
+pendant transcribe --limit 1
+systemctl --user enable --now pendant-transcribe.timer
+```
+
+Also: `pendant transcribe --list` (what's waiting), `--redo FILE` (transcribe one again). Settings: `PENDANT_WHISPER_MODEL` (`tiny.en` is faster, `small.en` more accurate), `PENDANT_WHISPER_BEAM` (1; higher is slower and a little more accurate). Log: `~/recordings/transcribe.log`. Tests (stand-in model): `pytest pi/tests`.
