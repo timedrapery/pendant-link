@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Pendant Link</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: single phone-width column — connection control, reading cards, raw log. */
+:root{
+  --bg:#eef0ec; --panel:#ffffff; --panel-2:#f6f7f4;
+  --ink:#1a1e1b; --muted:#5c655e; --line:#d7dbd4;
+  --accent:#2f6f5a; --accent-ink:#ffffff;
+  --good:#2c7a3f; --warn:#8a5a00; --bad:#b23a2e;
+  --code-bg:#eceee9; --code-ink:#273028;
+  --font-body:"Atkinson Hyperlegible","Segoe UI",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,Menlo,monospace;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#11140f; --panel:#1a1e18; --panel-2:#20251e;
+    --ink:#e7ebe3; --muted:#9aa497; --line:#2c3329;
+    --accent:#58b394; --accent-ink:#0c1410;
+    --good:#6fcf87; --warn:#e0a94a; --bad:#e8766a;
+    --code-bg:#13170f; --code-ink:#c9d2c2;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#11140f; --panel:#1a1e18; --panel-2:#20251e;
+  --ink:#e7ebe3; --muted:#9aa497; --line:#2c3329;
+  --accent:#58b394; --accent-ink:#0c1410;
+  --good:#6fcf87; --warn:#e0a94a; --bad:#e8766a;
+  --code-bg:#13170f; --code-ink:#c9d2c2;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font-family:var(--font-body);line-height:1.5;margin:0}
+.wrap{max-width:560px;margin:0 auto;padding-inline:16px;padding-block:24px 48px}
+h1{font-size:1.5rem;margin:0;letter-spacing:-0.01em}
+.sub{color:var(--muted);font-size:.85rem;margin:.25rem 0 0;text-transform:uppercase;letter-spacing:.08em}
+.topbar{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:20px}
+.themebtn{background:var(--panel);border:1px solid var(--line);color:var(--muted);border-radius:8px;padding:6px 10px;font:inherit;font-size:.8rem;cursor:pointer}
+.themebtn:hover{border-color:var(--accent)}
+
+.conn{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:18px}
+.statusline{display:flex;align-items:center;gap:10px;margin-bottom:14px}
+.dot{width:11px;height:11px;border-radius:50%;background:var(--muted);flex:none}
+.dot.on{background:var(--good)}
+.dot.busy{background:var(--warn)}
+.dot.err{background:var(--bad)}
+.statustext{font-weight:700}
+.statussub{color:var(--muted);font-size:.85rem;margin:2px 0 0}
+.btnrow{display:flex;flex-wrap:wrap;gap:10px}
+button.act{background:var(--accent);color:var(--accent-ink);border:none;border-radius:10px;padding:11px 18px;font:inherit;font-weight:700;cursor:pointer}
+button.act:hover{filter:brightness(1.06)}
+button.ghost{background:transparent;color:var(--ink);border:1px solid var(--line)}
+button.ghost:hover{border-color:var(--accent)}
+button:disabled{opacity:.45;cursor:not-allowed;filter:none}
+
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-bottom:18px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px}
+.card .label{color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.07em;margin:0 0 6px}
+.card .val{font-size:1.35rem;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.1}
+.card .val small{font-size:.8rem;font-weight:400;color:var(--muted)}
+.card .note{color:var(--muted);font-size:.8rem;margin:4px 0 0}
+.card.wide{grid-column:1/-1}
+.pill{display:inline-block;font-size:.78rem;font-weight:700;padding:2px 9px;border-radius:999px;border:1px solid var(--line)}
+.pill.good{color:var(--good);border-color:var(--good)}
+.pill.warn{color:var(--warn);border-color:var(--warn)}
+.pill.bad{color:var(--bad);border-color:var(--bad)}
+.btnflash{transition:background .1s}
+.btnflash.hit{background:color-mix(in srgb,var(--accent) 22%,transparent)}
+
+.logwrap{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.loghead{display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-bottom:1px solid var(--line)}
+.loghead .label{color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.07em;margin:0}
+.loghead .acts{display:flex;gap:8px}
+.minibtn{background:transparent;border:1px solid var(--line);color:var(--muted);border-radius:7px;padding:4px 9px;font:inherit;font-size:.75rem;cursor:pointer}
+.minibtn:hover{border-color:var(--accent);color:var(--ink)}
+#log{margin:0;padding:12px 14px;max-height:260px;overflow:auto;background:var(--code-bg);color:var(--code-ink);font-family:var(--font-mono);font-size:.76rem;line-height:1.55;white-space:pre-wrap;word-break:break-word}
+.logline{margin:0}
+.logline .t{color:var(--muted)}
+.logline.tx{color:var(--accent)}
+.logline.rx{color:var(--ink)}
+.logline.err{color:var(--bad)}
+.logline.ok{color:var(--good)}
+
+.banner{background:var(--panel-2);border:1px solid var(--line);border-left:3px solid var(--warn);border-radius:0 10px 10px 0;padding:12px 14px;margin-bottom:18px;font-size:.88rem}
+.banner.bad{border-left-color:var(--bad)}
+.banner b{color:var(--ink)}
+.foot{color:var(--muted);font-size:.8rem;margin-top:20px;line-height:1.6}
+.foot code{background:var(--code-bg);color:var(--code-ink);padding:1px 5px;border-radius:4px;font-family:var(--font-mono);font-size:.9em}
+a{color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="topbar">
+    <div>
+      <h1>Pendant Link</h1>
+      <p class="sub">Stage 1 · read-only connection test</p>
+    </div>
+    <button class="themebtn" id="theme" type="button">Theme</button>
+  </div>
+
+  <div id="ctxBanner" class="banner" hidden></div>
+
+  <div class="conn">
+    <div class="statusline">
+      <span class="dot" id="dot"></span>
+      <div>
+        <div class="statustext" id="statusText">Not connected</div>
+        <div class="statussub" id="statusSub">Tap connect, then pick “Pendant” from the list.</div>
+      </div>
+    </div>
+    <div class="btnrow">
+      <button class="act" id="connect" type="button">Connect</button>
+      <button class="act ghost" id="refresh" type="button" disabled>Read status</button>
+      <button class="act ghost" id="disconnect" type="button" disabled>Disconnect</button>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <p class="label">Battery</p>
+      <div class="val" id="vBattery">—</div>
+      <p class="note" id="nBattery">Standard Bluetooth battery service</p>
+    </div>
+    <div class="card">
+      <p class="label">State</p>
+      <div class="val" id="vState"><span class="pill" id="pState">unknown</span></div>
+      <p class="note" id="nState">Recording / listening / idle</p>
+    </div>
+    <div class="card">
+      <p class="label">Storage used</p>
+      <div class="val" id="vStorage">—</div>
+      <p class="note" id="nStorage">Flash pages on the device</p>
+    </div>
+    <div class="card">
+      <p class="label">Wi-Fi</p>
+      <div class="val" id="vWifi"><span class="pill" id="pWifi">unknown</span></div>
+      <p class="note" id="nWifi">On-device radio</p>
+    </div>
+    <div class="card wide">
+      <p class="label">Device</p>
+      <div class="val" id="vFirmware" style="font-size:1rem">—</div>
+      <p class="note" id="nFirmware">Firmware · serial</p>
+    </div>
+    <div class="card wide btnflash" id="buttonCard">
+      <p class="label">Last button press</p>
+      <div class="val" id="vButton" style="font-size:1.05rem">—</div>
+      <p class="note">Press the pendant button while connected</p>
+    </div>
+  </div>
+
+  <div class="logwrap">
+    <div class="loghead">
+      <p class="label">Raw log</p>
+      <div class="acts">
+        <button class="minibtn" id="copy" type="button">Copy</button>
+        <button class="minibtn" id="clear" type="button">Clear</button>
+      </div>
+    </div>
+    <div id="log" aria-live="polite"></div>
+  </div>
+
+  <p class="foot">
+    This reads only — it asks the pendant for its status and listens for button presses.
+    It never changes a setting, downloads audio, or touches your encryption key.
+    If something fails, tap <b>Copy</b> and paste the log back into the chat.
+    The service it looks for is <code>632de001-…</code>.
+  </p>
+</div>
+
+<script>
+"use strict";
+(function(){
+  // ---- UUIDs (from the pendant's GATT, reverse-engineered) ----
+  const SVC   = "632de001-604c-446b-a80f-7963e950f3fb"; // audio service (holds control + data chars)
+  const CTRL  = "632de002-604c-446b-a80f-7963e950f3fb"; // phone -> pendant (write)
+  const DATA  = "632de003-604c-446b-a80f-7963e950f3fb"; // pendant -> phone (notify)
+  const BATT_SVC = 0x180f, BATT_CHR = 0x2a19;
+
+  // ---- element refs ----
+  const $ = id => document.getElementById(id);
+  const dot=$("dot"), statusText=$("statusText"), statusSub=$("statusSub");
+  const bConnect=$("connect"), bRefresh=$("refresh"), bDisc=$("disconnect");
+  const logEl=$("log");
+
+  let device=null, server=null, ctrlChar=null, dataChar=null;
+  let msgIndex=0, reqId=0;
+  const frags={}; // reassembly by message index
+
+  // ---------- logging ----------
+  function log(kind,msg){
+    const line=document.createElement("div");
+    line.className="logline "+(kind||"");
+    const t=new Date().toLocaleTimeString();
+    line.innerHTML='<span class="t">'+t+'</span>  '+msg;
+    logEl.appendChild(line);
+    logEl.scrollTop=logEl.scrollHeight;
+  }
+  const hex=u8=>Array.from(u8,b=>b.toString(16).padStart(2,"0")).join(" ");
+
+  // ---------- tiny protobuf writer ----------
+  function varint(n){const o=[];while(n>127){o.push((n&0x7f)|0x80);n=Math.floor(n/128);}o.push(n);return o;}
+  const tag=(num,wire)=>varint((num<<3)|wire);
+  const lenField=(num,arr)=>[...tag(num,2),...varint(arr.length),...arr];
+  const vField=(num,val)=>[...tag(num,0),...varint(val)];
+
+  function buildCommand(cmdField){
+    reqId++;
+    const requestData=vField(1,reqId);              // RequestData{ request_id }
+    const cmd=[...lenField(cmdField,[]),...lenField(30,requestData)]; // ServerCommandMsg
+    const env=[...vField(1,msgIndex++),...vField(2,0),...vField(3,1),...lenField(4,cmd)];
+    return new Uint8Array(env);
+  }
+
+  // ---------- tiny protobuf reader ----------
+  function readVarint(b,i){let shift=0,res=0,byte;do{byte=b[i++];res+=(byte&0x7f)*Math.pow(2,shift);shift+=7;}while(byte&0x80);return[res,i];}
+  function parseFields(b){
+    const f={};let i=0;
+    while(i<b.length){
+      let tg;[tg,i]=readVarint(b,i);
+      const num=tg>>>3,wire=tg&7;let val;
+      if(wire===0){[val,i]=readVarint(b,i);}
+      else if(wire===2){let len;[len,i]=readVarint(b,i);val=b.slice(i,i+len);i+=len;}
+      else if(wire===5){val=b.slice(i,i+4);i+=4;}
+      else if(wire===1){val=b.slice(i,i+8);i+=8;}
+      else break;
+      (f[num]=f[num]||[]).push(val);
+    }
+    return f;
+  }
+  const first=(f,n)=>f[n]&&f[n][0];
+  const asStr=u8=>{try{return new TextDecoder().decode(u8);}catch(e){return "";}};
+
+  // ---------- interpret a PendantAllMsg ----------
+  const BTN={0:"none",1:"short press",2:"long press",3:"double press",4:"short + super-long press"};
+  const REC={0:"idle",1:"recording",2:"listening"};
+  const BAT={0:"unknown",1:"charging",2:"on battery",3:"not charging",4:"full"};
+  const USB={0:"unknown",1:"unplugged",2:"plugged in"};
+
+  function handleMessage(payload){
+    const f=parseFields(payload);
+    // DeviceInfoMsg (field 1)
+    if(f[1]){
+      const d=parseFields(f[1][0]);
+      const fw=d[3]?asStr(d[3][0]):"?";
+      const serialBytes=d[2]&&d[2][0];
+      const serial=serialBytes?(typeof serialBytes==="object"?asStr(serialBytes):serialBytes):"?";
+      $("vFirmware").textContent="fw "+fw;
+      $("nFirmware").textContent="serial "+(serial||"?");
+      log("ok","device info: firmware "+fw);
+    }
+    // DeviceStatus (field 5)
+    if(f[5]){
+      const s=parseFields(f[5][0]);
+      if(s[7]){const r=parseFields(s[7][0]);const st=first(r,1)||0;setState(REC[st]||"unknown",st);}
+      if(s[5]){
+        const ss=parseFields(s[5][0]);
+        const free=first(ss,4)||0,total=first(ss,5)||0;
+        if(total>0){const used=Math.round((total-free)/total*100);
+          $("vStorage").innerHTML=used+'<small>%</small>';
+          $("nStorage").textContent=(total-free)+" of "+total+" pages";}
+      }
+      if(s[1]){
+        const w=parseFields(s[1][0]);const conn=first(w,1)||0;const ssid=w[2]?asStr(w[2][0]):"";
+        setPill("pWifi",conn?"connected":"off",conn?"good":"");
+        $("nWifi").textContent=conn&&ssid?ssid:"On-device radio";
+      }
+      if(s[9]) battFromStatus(parseFields(s[9][0]));
+      log("ok","status received");
+    }
+    // BatteryStatus (field 7)
+    if(f[7]) battFromStatus(parseFields(f[7][0]));
+    // ButtonStatus (field 8)
+    if(f[8]){
+      const b=parseFields(f[8][0]);const ev=first(b,1)||0;
+      $("vButton").textContent=(BTN[ev]||"event "+ev)+"  ·  "+new Date().toLocaleTimeString();
+      flashButton();
+      log("ok","button: "+(BTN[ev]||ev));
+    }
+  }
+  function battFromStatus(b){
+    const soc=first(b,5),state=first(b,1)||0,usb=first(b,9)||0;
+    if(soc!=null){$("vBattery").textContent=soc+"%";}
+    const bits=[];if(state)bits.push(BAT[state]||"");if(usb===2)bits.push("USB");
+    $("nBattery").textContent=bits.filter(Boolean).join(" · ")||"Battery level";
+  }
+  function setState(label,code){
+    $("pState").textContent=label;
+    $("pState").className="pill "+(code===1?"bad":code===2?"good":"");
+    $("vState").innerHTML="";$("vState").appendChild($("pState"));
+  }
+  function setPill(id,label,cls){const p=$(id);p.textContent=label;p.className="pill "+(cls||"");}
+  let flashTimer=null;
+  function flashButton(){const c=$("buttonCard");c.classList.add("hit");clearTimeout(flashTimer);flashTimer=setTimeout(()=>c.classList.remove("hit"),220);}
+
+  // ---------- BLE notify handling ----------
+  function onNotify(ev){
+    const v=new Uint8Array(ev.target.value.buffer);
+    log("rx","rx "+hex(v));
+    const env=parseFields(v);
+    const idx=first(env,1)||0, seq=first(env,2)||0, num=first(env,3)||1, payload=first(env,4);
+    if(!payload)return;
+    if(num===1){ try{handleMessage(payload);}catch(e){log("err","decode error: "+e.message);} return; }
+    // reassemble multi-fragment
+    frags[idx]=frags[idx]||new Array(num).fill(null);
+    frags[idx][seq]=payload;
+    if(frags[idx].every(x=>x)){
+      const full=new Uint8Array(frags[idx].reduce((a,p)=>a+p.length,0));
+      let o=0;frags[idx].forEach(p=>{full.set(p,o);o+=p.length;});
+      delete frags[idx];
+      try{handleMessage(full);}catch(e){log("err","decode error: "+e.message);}
+    }
+  }
+
+  // ---------- commands ----------
+  async function send(bytes,label){
+    if(!ctrlChar)return;
+    log("tx","tx "+label+"  "+hex(bytes));
+    try{ await ctrlChar.writeValueWithResponse(bytes); }
+    catch(e){
+      try{ await ctrlChar.writeValueWithoutResponse(bytes); }
+      catch(e2){ log("err","write failed: "+e2.message); }
+    }
+  }
+  async function readAll(){
+    await send(buildCommand(21),"GetDeviceStatus");
+    await send(buildCommand(14),"GetDeviceInfo");
+    await readBattery();
+  }
+  async function readBattery(){
+    try{
+      const svc=await server.getPrimaryService(BATT_SVC);
+      const ch=await svc.getCharacteristic(BATT_CHR);
+      const v=await ch.readValue();
+      const lvl=v.getUint8(0);
+      $("vBattery").textContent=lvl+"%";
+      log("ok","battery service: "+lvl+"%");
+      try{ await ch.startNotifications(); ch.addEventListener("characteristicvaluechanged",e=>{
+        $("vBattery").textContent=e.target.value.getUint8(0)+"%";});}catch(e){}
+    }catch(e){ log("err","battery service unavailable: "+e.message); }
+  }
+
+  // ---------- connect / disconnect ----------
+  function setStatus(cls,text,sub){
+    dot.className="dot "+(cls||"");
+    statusText.textContent=text;
+    if(sub!=null)statusSub.textContent=sub;
+  }
+  async function connect(){
+    if(!navigator.bluetooth){ ctxFail(); return; }
+    try{
+      setStatus("busy","Requesting device…","Pick “Pendant” from the browser’s list.");
+      device=await navigator.bluetooth.requestDevice({
+        filters:[{services:[SVC]},{namePrefix:"Pendant"}],
+        optionalServices:[SVC,BATT_SVC]
+      });
+      device.addEventListener("gattserverdisconnected",onDisconnect);
+      log("","selected: "+(device.name||"unnamed")+" ("+device.id+")");
+      setStatus("busy","Connecting…","Bonding may prompt you on first connect.");
+      server=await device.gatt.connect();
+      const svc=await server.getPrimaryService(SVC);
+      ctrlChar=await svc.getCharacteristic(CTRL);
+      dataChar=await svc.getCharacteristic(DATA);
+      await dataChar.startNotifications();
+      dataChar.addEventListener("characteristicvaluechanged",onNotify);
+      log("ok","connected, notifications on");
+      setStatus("on","Connected",device.name||"Pendant");
+      bConnect.disabled=true;bRefresh.disabled=false;bDisc.disabled=false;
+      await readAll();
+    }catch(e){
+      if(e&&e.name==="NotFoundError"){ setStatus("","Not connected","No device picked."); }
+      else{ setStatus("err","Connection failed",e.message); log("err",e.name+": "+e.message); }
+    }
+  }
+  function onDisconnect(){
+    setStatus("","Disconnected","Tap connect to reconnect.");
+    bConnect.disabled=false;bRefresh.disabled=true;bDisc.disabled=true;
+    ctrlChar=dataChar=server=null;
+    log("","disconnected");
+  }
+  function disconnect(){ if(device&&device.gatt.connected)device.gatt.disconnect(); }
+
+  // ---------- Web Bluetooth availability ----------
+  function ctxFail(){
+    const b=$("ctxBanner");b.hidden=false;b.className="banner bad";
+    b.innerHTML="<b>Web Bluetooth isn’t available in this view.</b> This test needs Chrome on Android with the page opened at its own address (not embedded). If it stays unavailable here, the next step is hosting it on GitHub Pages — I can set that up.";
+    bConnect.disabled=true;
+    setStatus("err","Unavailable","No Bluetooth access in this context.");
+  }
+
+  // ---------- theme toggle ----------
+  $("theme").addEventListener("click",()=>{
+    const cur=document.documentElement.getAttribute("data-theme");
+    const next=cur==="dark"?"light":cur==="light"?"dark":
+      (matchMedia("(prefers-color-scheme: dark)").matches?"light":"dark");
+    document.documentElement.setAttribute("data-theme",next);
+  });
+
+  // ---------- log buttons ----------
+  $("clear").addEventListener("click",()=>{logEl.innerHTML="";});
+  $("copy").addEventListener("click",async()=>{
+    const txt=logEl.innerText;
+    try{ await navigator.clipboard.writeText(txt); flash($("copy"),"Copied"); }
+    catch(e){
+      const r=document.createRange();r.selectNodeContents(logEl);
+      const s=getSelection();s.removeAllRanges();s.addRange(r);flash($("copy"),"Selected");
+    }
+  });
+  function flash(btn,txt){const o=btn.textContent;btn.textContent=txt;setTimeout(()=>btn.textContent=o,1200);}
+
+  bConnect.addEventListener("click",connect);
+  bRefresh.addEventListener("click",readAll);
+  bDisc.addEventListener("click",disconnect);
+
+  // availability check at load
+  if(!navigator.bluetooth){ ctxFail(); }
+  else { log("","ready — tap Connect"); }
+})();
+</script>
+</body>
+</html>
