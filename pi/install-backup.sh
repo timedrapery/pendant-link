@@ -41,7 +41,27 @@ if ! rclone listremotes 2>/dev/null | grep -qx "gdrive:"; then
   echo "(This works only if you connected with: ssh -L 53682:127.0.0.1:53682 alexander@xrxpix.local)"
   echo
   rclone authorize "drive" "eyJzY29wZSI6ImRyaXZlLmZpbGUifQ" --auth-no-open-browser > "$OUT" || true
-  TOKEN="$(grep -m1 '^{.*access_token.*}$' "$OUT" || true)"
+  # rclone prints the result between "--->" and "<---End paste": either the token itself,
+  # or (when given a config argument, as here) base64 of {"token": "<token>"}.
+  TOKEN="$(python3 - "$OUT" <<'PYEOF'
+import base64, json, sys
+text = open(sys.argv[1]).read()
+if "--->" in text and "<---" in text:
+    text = text.split("--->", 1)[1].split("<---", 1)[0]
+blob = text.strip()
+token = ""
+if blob.startswith("{"):
+    token = blob
+elif blob:
+    try:
+        data = json.loads(base64.urlsafe_b64decode(blob + "=" * (-len(blob) % 4)))
+        token = data.get("token", "")
+    except Exception:
+        pass
+if token and "access_token" in token:
+    print(token)
+PYEOF
+)"
   rm -f "$OUT"
   if [ -z "$TOKEN" ]; then
     echo "Didn't get a token from Google. Nothing was changed; run this again."
