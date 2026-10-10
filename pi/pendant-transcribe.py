@@ -10,6 +10,7 @@ Run it as `pendant transcribe` (the nightly timer does), or:
     pendant transcribe --list         show what's waiting
     pendant transcribe --limit 3      do at most 3 recordings
     pendant transcribe --redo FILE    transcribe one recording again
+    pendant transcribe --check FILE   loudness and how much speech is detected (numbers only)
 Settings (environment): PENDANT_WHISPER_MODEL (default base.en), PENDANT_WHISPER_THREADS (4),
 PENDANT_WHISPER_BEAM (1), PENDANT_ARCHIVE (~/recordings).
 """
@@ -112,6 +113,31 @@ def _clock(seconds):
     return f"{s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}"
 
 
+def check(wav: Path):
+    """Numbers only: is the audio there, how loud is it, how much speech does VAD find."""
+    import numpy as np
+    from faster_whisper.vad import VadOptions, get_speech_timestamps
+
+    audio = read_wav(wav)
+    secs = len(audio) / 16000
+    peak = float(np.abs(audio).max()) if len(audio) else 0.0
+    rms = float(np.sqrt(np.mean(audio ** 2))) if len(audio) else 0.0
+    db = lambda x: 20 * np.log10(max(x, 1e-9))
+    print(f"{wav.name}: {secs / 60:.1f} min")
+    print(f"  loudness: peak {db(peak):.1f} dBFS, average {db(rms):.1f} dBFS")
+    print(f"  silent (near zero): {100 * float(np.mean(np.abs(audio) < 1e-4)):.0f}% of samples")
+    for threshold in (0.5, 0.35, 0.2):
+        ts = get_speech_timestamps(audio, VadOptions(threshold=threshold))
+        found = sum(t["end"] - t["start"] for t in ts) / 16000
+        print(f"  speech detected at sensitivity {threshold}: {found:.0f} s in {len(ts)} stretches")
+    if peak > 0:
+        louder = audio * min(0.5 / peak, 50.0)
+        ts = get_speech_timestamps(louder, VadOptions())
+        found = sum(t["end"] - t["start"] for t in ts) / 16000
+        print(f"  speech detected after turning it up: {found:.0f} s in {len(ts)} stretches")
+    return 0
+
+
 def load_model():
     from faster_whisper import WhisperModel
     return WhisperModel(MODEL, device="cpu", compute_type="int8", cpu_threads=THREADS)
@@ -122,7 +148,11 @@ def main(argv=None, model_factory=load_model):
     ap.add_argument("--list", action="store_true", help="show recordings waiting for a transcript")
     ap.add_argument("--limit", type=int, default=0, help="do at most this many recordings")
     ap.add_argument("--redo", metavar="FILE", help="transcribe this recording again")
+    ap.add_argument("--check", metavar="FILE", help="show loudness and detected speech for one recording")
     args = ap.parse_args(argv)
+
+    if args.check:
+        return check(Path(args.check).expanduser().with_suffix(".wav"))
 
     if args.redo:
         wav = Path(args.redo).expanduser().with_suffix(".wav")
