@@ -281,7 +281,7 @@ index a5867ef..39448a6 100644
  
          if self.on_response:
 diff --git a/src/pendant/core/protocol.py b/src/pendant/core/protocol.py
-index c342f7e..a4571d0 100644
+index c342f7e..0d001ef 100644
 --- a/src/pendant/core/protocol.py
 +++ b/src/pendant/core/protocol.py
 @@ -10,6 +10,36 @@ from .config import KEYS_DIR
@@ -388,7 +388,7 @@ index c342f7e..a4571d0 100644
                  })
  
              # Extract response_data if present
-@@ -381,6 +399,41 @@ class PendantProtocol:
+@@ -381,6 +399,40 @@ class PendantProtocol:
              return None
  
  
@@ -409,11 +409,10 @@ index c342f7e..a4571d0 100644
 +
 +def format_device_info_lines(info: dict) -> list:
 +    """Human-readable lines for a decoded DeviceInfoMsg."""
-+    lines = [
-+        f"  Firmware: {info.get('firmware_version') or '?'}",
-+        f"  Serial: {info.get('serial_number') or '?'}",
-+        f"  Device ID: {info.get('device_id', '?')}",
-+    ]
++    lines = [f"  Firmware: {info.get('firmware_version') or '?'}"]
++    if info.get("serial_number"):  # the pendant often leaves this blank
++        lines.append(f"  Serial: {info['serial_number']}")
++    lines.append(f"  Device ID: {info.get('device_id', '?')}")
 +    if info.get("ble_mac_address"):
 +        lines.append(f"  Bluetooth address: {info['ble_mac_address']}")
 +    if info.get("battery_percent"):
@@ -454,7 +453,7 @@ index cdd3ff3..3b84f90 100644
      status = pb.DeviceStatus()
      status.storage_state.CopyFrom(storage)
 diff --git a/tests/test_protocol.py b/tests/test_protocol.py
-index ad39d00..bd88337 100644
+index ad39d00..822bfc5 100644
 --- a/tests/test_protocol.py
 +++ b/tests/test_protocol.py
 @@ -73,6 +73,8 @@ class TestPendantProtocol:
@@ -501,7 +500,7 @@ index ad39d00..bd88337 100644
      def test_extract_audio_from_flash_page(self, protocol, sample_flash_page_data):
          """Test extracting audio data from a flash page."""
          opus, pcm, encrypted, codec_type, page_info = protocol.extract_audio_from_flash_page(
-@@ -176,3 +203,20 @@ class TestExistingCommands:
+@@ -176,3 +203,29 @@ class TestExistingCommands:
          cmd = protocol.create_command("set_server_public_key", public_key=fake_key)
          assert isinstance(cmd, bytes)
          assert len(cmd) > 0
@@ -522,3 +521,12 @@ index ad39d00..bd88337 100644
 +    lines = format_status_lines({"recording_state": None, "storage_used_pages": 5, "storage_total_pages": 100,
 +                                 "storage_used_percent": 5.0})
 +    assert not any("Recording" in l for l in lines)
++
++
++def test_blank_serial_is_hidden():
++    """An empty serial number from the pendant is left out, not shown as '?'."""
++    from pendant.core.protocol import format_device_info_lines
++    lines = format_device_info_lines({"firmware_version": "1.1.20", "serial_number": "", "device_id": 7})
++    assert not any("Serial" in l for l in lines)
++    lines = format_device_info_lines({"firmware_version": "1.1.20", "serial_number": "PND-1", "device_id": 7})
++    assert any("Serial: PND-1" in l for l in lines)
