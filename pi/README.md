@@ -14,6 +14,7 @@ This sets up a Raspberry Pi to look after your Limitless Pendant by itself: sync
 8. [Transcripts](#8-transcripts)
 9. [Nightly backup to Google Drive (optional)](#9-nightly-backup-to-google-drive-optional)
 10. [Stars, the light, and a morning note](#10-stars-the-light-and-a-morning-note)
+11. [Browse your days](#11-browse-your-days)
 
 Then: [everyday commands](#everyday-commands) · [where things are](#where-things-are) · [troubleshooting](#troubleshooting) · [uninstall](#uninstall) · [what the patch changes](#what-the-pendant-cli-patch-changes)
 
@@ -321,6 +322,20 @@ With the light off, `pendant status` still tells you whether it's recording.
 
 With readable transcripts on Drive (step 9), an AI assistant that can read your Google Drive can write you a short note each morning about the day before, starred moments first. [`morning-note.md`](morning-note.md) has a ready-made prompt to use as a daily scheduled task.
 
+## 11. Browse your days
+
+A page the Pi serves on your home network, for your phone or computer: your days, each day's transcript in order (split into conversations at long pauses), your stars highlighted, search across everything, and a page of just your starred moments. **Tap a line to hear it** from that moment. If a recording's WAV was tidied away, a button rebuilds it in a few seconds.
+
+```
+curl -fsSL https://raw.githubusercontent.com/timedrapery/pendant-link/main/pi/install-web.sh | bash -s main
+```
+
+It prints the address to open (like `http://pendantpi.local:8765`, plus a numbered one in case `.local` names don't work on your phone) and a password. Any user name works with it, and your browser can remember it. The password is also in `~/.config/pendant/env`.
+
+- It only uses Python's built-in parts, so nothing new is installed, and it starts by itself at boot.
+- It's reachable only on your home network, and only with the password, because transcripts hold other people's words too. It's plain HTTP, so treat it as a home-only page; don't forward the port on your router.
+- It doesn't log what anyone views.
+
 ---
 
 ## Everyday commands
@@ -337,6 +352,8 @@ With readable transcripts on Drive (step 9), an AI assistant that can read your 
 | `pendant backup` | Back up now |
 | `pendant led 0` | Light off (`100` is full) |
 | `pendant crypto status` | Which keys are set up |
+| `systemctl --user restart pendant-web` | Restart the browse page |
+| `grep WEB_PASSWORD ~/.config/pendant/env` | Show the browse page's password |
 | `systemctl --user list-timers` | When each job runs next (`q` to quit) |
 | `tail -20 ~/recordings/sync.log` | What the last syncs did (also `transcribe.log`, `backup.log`) |
 
@@ -349,7 +366,7 @@ With readable transcripts on Drive (step 9), an AI assistant that can read your 
 | `~/.config/pendant/env` | Settings: your pendant's address, options |
 | `~/.config/pendant/keys/` | Your encryption keys and backup passwords. Keep a copy elsewhere. |
 | `~/.local/share/pendant/` | The sync, backup and transcription scripts, and the transcription environment |
-| `~/.config/systemd/user/pendant-*` | The three timers and their jobs |
+| `~/.config/systemd/user/pendant-*` | The three timers and their jobs, and the browse page |
 
 ## Troubleshooting
 
@@ -368,13 +385,14 @@ With readable transcripts on Drive (step 9), an AI assistant that can read your 
 | A program shows `Stopped` after Ctrl+Z | Ctrl+Z pauses rather than cancels. End it with `kill %1`. |
 | Transcripts have very few lines | The pendant records only while it hears speech, so quiet time leaves little to transcribe. Talk near it and run `pendant sync` then `pendant transcribe` to check. |
 | Transcript times look off for recordings from before you updated | Redo the day: `pendant transcribe --redo-day <YYYY-MM-DD>`. |
+| The browse page won't open | Use the numbered address the installer printed (`hostname -I` shows it) if `.local` doesn't work on your phone. Check it's running: `systemctl --user status pendant-web --no-pager`. |
 | The light came back on | Run `pendant led 0` again. |
 | "Getting full" in `transcribe.log` | Lower `PENDANT_KEEP_WAV_DAYS` in `~/.config/pendant/env`, or move old day folders off the Pi (they're in the backup if you set it up). |
 
 ## Uninstall
 
 ```
-systemctl --user disable --now pendant-sync.timer pendant-transcribe.timer pendant-backup.timer
+systemctl --user disable --now pendant-sync.timer pendant-transcribe.timer pendant-backup.timer pendant-web.service
 rm -f ~/.config/systemd/user/pendant-* && systemctl --user daemon-reload
 rm -rf ~/.local/share/pendant ~/pendant-cli ~/.local/bin/pendant
 ```
@@ -407,5 +425,5 @@ That leaves your recordings (`~/recordings`) and keys (`~/.config/pendant`) alon
 ## Developing
 
 - pendant-cli's tests, with the patch applied: `cd ~/pendant-cli && python -m pytest`
-- Transcription tests (a stand-in model, no audio needed): `pip install pytest numpy faster-whisper`, then `pytest pi/tests`
+- Transcription and browse-page tests (a stand-in model, no audio needed): `pip install pytest numpy faster-whisper`, then `pytest pi/tests`
 - The installers take a commit as their argument (`bash -s <commit>`), so you can pin an exact version. `main` is the latest; GitHub may serve a version up to 5 minutes old right after a change.

@@ -1,0 +1,14 @@
+[Unit]
+Description=Browse your pendant days (web page on your home network)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=%h/.config/pendant/env
+ExecStart=/usr/bin/python3 %h/.local/share/pendant/pendant-web.py
+Restart=on-failure
+RestartSec=10
+Nice=5
+
+[Install]
+WantedBy=default.target

@@ -11,6 +11,7 @@ Limitless was acquired by Meta in December 2025, and support for the pendant end
 - **Transcripts made on the Pi.** Each night the recordings become text with real clock times, using an open speech-to-text model that runs on the Pi. No audio is sent anywhere to be transcribed.
 - **Stars.** One quick press of the pendant button marks a moment ("keep this"), as in the Limitless app. Lines around it are starred in the transcript.
 - **Nightly encrypted backup** to Google Drive (optional). It's encrypted on the Pi first, so Google can't read it.
+- **Browse your days** from your phone on your home Wi-Fi: each day's transcript, your stars, search, and tap a line to hear it.
 - **The light** can be dimmed or turned off: `pendant led 0`.
 - Optionally, readable transcripts on Drive so an assistant like Claude can read them, for example to write you a short note each morning about the day before.
 
