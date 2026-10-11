@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Copy the recordings archive to Google Drive, encrypted on the Pi first (rclone crypt).
 # Copies, never mirrors: deleting something here never deletes the backup.
-# Skips .wav files (rebuild them with `pendant decode`) and anything still in .incoming.
+# Skips .wav files (rebuild them with `pendant decode`), anything still in .incoming, and
+# .replaced (copies set aside because a kept copy provably holds all of them).
 # Run it as `pendant backup`; pendant-backup.timer does that every night.
 set -euo pipefail
 
@@ -24,6 +25,7 @@ log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*"; }
 log "Backing up $ARCHIVE"
 rclone copy "$ARCHIVE" "$REMOTE" \
   --exclude ".incoming/**" \
+  --exclude ".replaced/**" \
   --exclude "*.wav" \
   --exclude "*.lock" \
   --exclude "*.log" \
