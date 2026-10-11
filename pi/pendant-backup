@@ -25,24 +25,41 @@ exec > >(tee -a "$LOG") 2>&1
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*"; }
 
 SKIP=(--exclude ".incoming/**" --exclude ".replaced/**" --exclude ".filing-journal/**"
-      --exclude "*.wav" --exclude "*.lock" --exclude "*.log" --exclude "*.tmp" --exclude "*.filing")
+      --exclude "*.wav" --exclude "*.lock" --exclude "*.log" --exclude "*.tmp" --exclude "*.filing"
+      --exclude "/.last-backup")
+LAST="$ARCHIVE/.last-backup"   # when the last successful backup started (seconds since 1970)
 
 if [ "${1:-}" = "--check" ]; then
-  log "Checking the backup against $ARCHIVE (nothing is downloaded)"
-  if rclone cryptcheck "$ARCHIVE" "$REMOTE" --one-way "${SKIP[@]}" --checkers 4 -v; then
-    log "Backup check passed: every file here is in the backup, intact."
+  # Check only what the last backup should hold: files unchanged since it started. Newer
+  # ones (this morning's recordings, the status files every sync rewrites) go up next time.
+  AGE=()
+  if START=$(cat "$LAST" 2>/dev/null) && [ -n "$START" ]; then
+    AGE=(--min-age "$(( $(date +%s) - START ))s")
+    log "Checking the backup against $ARCHIVE: everything as of the last backup, $(date -d "@$START" '+%Y-%m-%d %H:%M') (nothing is downloaded)"
+    NEWER=$(find "$ARCHIVE" -type f -newermt "@$START" ! -path "*/.incoming/*" ! -path "*/.replaced/*" \
+            ! -path "*/.filing-journal/*" ! -name "*.wav" ! -name "*.log" ! -name "*.lock" ! -name ".last-backup" | wc -l)
+  else
+    log "Checking the backup against everything in $ARCHIVE (no record of the last backup yet; nothing is downloaded)"
+    NEWER=0
+  fi
+  if rclone cryptcheck "$ARCHIVE" "$REMOTE" --one-way "${SKIP[@]}" "${AGE[@]}" --checkers 4; then
+    log "Backup check passed: every file as of the last backup is there, intact."
+    [ "$NEWER" -gt 0 ] && log "  ($NEWER newer file(s) not checked; they go up with the next backup.)"
     exit 0
   fi
-  log "Backup check found differences (listed above). Files made since the last backup show as missing until the next one runs."
+  log "Backup check found differences (listed above): those files are missing from the backup or don't match."
+  log "  Run 'pendant backup' and check again; if they still differ, the backup needs a look."
   exit 1
 fi
 
 log "Backing up $ARCHIVE"
+START=$(date +%s)
 rclone copy "$ARCHIVE" "$REMOTE" \
   "${SKIP[@]}" \
   --transfers 2 --tpslimit 8 \
   --stats-one-line --stats 60s -v || { log "Backup failed; will try again tomorrow."; exit 1; }
 log "Backup done."
+echo "$START" > "$LAST.tmp" && mv "$LAST.tmp" "$LAST"
 
 if [ "${PENDANT_TRANSCRIPTS_TO_DRIVE:-}" = "yes" ]; then
   log "Copying readable transcripts (text only) to $TRANSCRIPTS_REMOTE"
