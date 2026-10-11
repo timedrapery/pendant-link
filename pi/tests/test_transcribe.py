@@ -23,6 +23,13 @@ def tr(tmp_path, monkeypatch):
         return real(wav)
 
     mod.read_wav = tracking
+    real_windows = mod.wav_windows
+
+    def tracking_windows(wav, *a, **kw):
+        FakeModel.current = Path(wav).name
+        yield from real_windows(wav, *a, **kw)
+
+    mod.wav_windows = tracking_windows
     return mod
 
 
@@ -345,3 +352,83 @@ def test_tidy_keeps_wav_when_rebuild_would_be_short(tr, tmp_path, monkeypatch):
     monkeypatch.setenv("PENDANT_BIN", str(_fake_decoder(tmp_path, 10)))    # full length
     deleted, _ = tr.tidy(tmp_path, "14", today=date(2026, 10, 30))
     assert deleted == 1
+
+
+def _write_samples(path, samples):
+    import wave
+    import numpy as np
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
+        w.writeframes(np.asarray(samples, dtype="<i2").tobytes())
+
+
+def test_pieces_cover_every_sample_once_and_cut_in_quiet(tr, tmp_path):
+    import numpy as np
+    rng = np.random.default_rng(1)
+    loud = (rng.standard_normal(16000 * 25) * 3000).astype("<i2")
+    loud[16000 * 8: 16000 * 8 + 8000] = 0          # a half-second pause at 8.0-8.5 s
+    loud[16000 * 17: 16000 * 17 + 8000] = 0        # and one at 17.0-17.5 s
+    wav = tmp_path / "long.wav"
+    _write_samples(wav, loud)
+    pieces = list(tr.wav_windows(wav, seconds=10, search=4))
+    back = np.concatenate([p for _, p in pieces])
+    assert len(back) == len(loud)
+    assert np.allclose(back, loud.astype(np.float32) / 32768.0)
+    offsets = [o for o, _ in pieces]
+    assert offsets[0] == 0 and 8.0 <= offsets[1] <= 8.5 and 17.0 <= offsets[2] <= 17.5
+
+
+def test_short_recording_is_one_piece(tr, tmp_path):
+    wav = tmp_path / "short.wav"
+    _write_wav(wav, seconds=3.0)
+    pieces = list(tr.wav_windows(wav, seconds=10, search=4))
+    assert len(pieces) == 1 and pieces[0][0] == 0 and len(pieces[0][1]) == 48000
+
+
+def test_times_stay_right_across_pieces(tr, tmp_path, monkeypatch):
+    import numpy as np
+    from datetime import datetime
+    start = datetime(2026, 10, 10, 16, 11, 27)
+    wav = _rec(tmp_path, "20261010_161127", int(start.timestamp() * 1000))
+    _write_samples(wav, (np.random.default_rng(2).standard_normal(16000 * 25) * 3000).astype("<i2"))
+    monkeypatch.setattr(tr, "WINDOW_SECONDS", 10)
+    monkeypatch.setattr(tr, "CUT_SEARCH_SECONDS", 4)
+
+    class PerPiece:
+        def __init__(self):
+            self.n = 0
+        def transcribe(self, audio, **kw):
+            self.n += 1
+            return iter([SimpleNamespace(start=1.0, end=2.0, text=f"piece {self.n}")]), None
+
+    m = PerPiece()
+    tr.main([], model_factory=lambda: m)
+    lines = wav.with_suffix(".txt").read_text().splitlines()
+    assert m.n == 3 and lines[0] == "[16:11:28] piece 1"
+    secs = [int(l[7:9]) + 60 * int(l[4:6]) for l in lines]   # mm:ss of each line
+    assert secs[1] - secs[0] >= 6 and secs[2] - secs[1] >= 6  # later pieces are offset
+    words = json.loads(wav.with_suffix(".words.json").read_text())
+    assert words["duration"] == 25.0
+
+
+def test_memory_stays_at_one_piece(tr, tmp_path):
+    import tracemalloc
+    import numpy as np
+    wav = tmp_path / "evening.wav"
+    _write_samples(wav, (np.random.default_rng(3).standard_normal(16000 * 600) * 3000).astype("<i2"))  # 10 min, 19 MB
+    tracemalloc.start()
+    total = sum(len(p) for _, p in tr.wav_windows(wav, seconds=60, search=10))
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    assert total == 16000 * 600
+    assert peak < 19_000_000  # a few one-minute pieces' worth: under half the whole recording (38 MB as float32)
+
+
+def test_stars_found_in_a_large_metadata_file(tr, tmp_path):
+    from datetime import datetime
+    wav = _rec(tmp_path, "20261010_161127")
+    press = int(datetime(2026, 10, 10, 18, 0, 0).timestamp() * 1000)
+    meta = {"recording_start_ms": press - 3600_000, "pages": [{"chunks": [{"x": i}]} for i in range(20000)],
+            "stars_ms": [press]}
+    wav.with_suffix(".json").write_text(json.dumps(meta, indent=2))
+    assert tr.stars_for(wav) == [datetime(2026, 10, 10, 18, 0, 0)]

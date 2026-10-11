@@ -405,6 +405,7 @@ It prints the address to open (like `http://pendantpi.local:8765`, plus a number
 | `journalctl --user` says `No journal files were found` | Raspberry Pi OS keeps those logs elsewhere. Use the plain logs: `tail -20 ~/recordings/sync.log`. |
 | The Google sign-in page won't open, or "Didn't get a token" | Reconnect with `ssh -L 53682:127.0.0.1:53682 ...` (step 9) and run the installer again. Click Allow once, and don't type in the terminal while it waits. |
 | A program shows `Stopped` after Ctrl+Z | Ctrl+Z pauses rather than cancels. End it with `kill %1`. |
+| Transcription stops without a word in `transcribe.log` | Probably out of memory on an older version, which loaded whole recordings at once. Update (step 8); it now works through long recordings in 10-minute pieces. |
 | Transcripts have very few lines | The pendant records only while it hears speech, so quiet time leaves little to transcribe. Talk near it and run `pendant sync` then `pendant transcribe` to check. |
 | Transcript times look off for recordings from before you updated | Redo the day: `pendant transcribe --redo-day <YYYY-MM-DD>`. |
 | The browse page won't open | Use the numbered address the installer printed (`hostname -I` shows it) if `.local` doesn't work on your phone. Check it's running: `systemctl --user status pendant-web --no-pager`. |

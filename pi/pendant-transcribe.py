@@ -74,15 +74,35 @@ def pending(archive: Path):
             yield wav
 
 
-def recording_start(wav: Path):
-    """Clock time the recording began: from the .json sidecar, else from the file name."""
-    meta = wav.with_suffix(".json")
+def load_meta(wav: Path):
+    """What transcription needs from a recording's .json, without keeping the rest.
+
+    A long recording's .json can be over 100 MB (every page's details), so it's read once
+    and only the start time, stars, timeline, and (for older files) a compact page list
+    are kept.
+    """
     try:
-        ms = json.loads(meta.read_text()).get("recording_start_ms")
-        if ms:
-            return datetime.fromtimestamp(ms / 1000)
+        meta = json.loads(wav.with_suffix(".json").read_text())
     except (OSError, ValueError):
-        pass
+        return {}
+    keep = {k: meta.get(k) for k in ("recording_start_ms", "stars_ms", "timeline", "total_audio_bytes")}
+    if not meta.get("timeline") and meta.get("pages"):
+        keep["pages"] = [
+            {"absolute_timestamp_ms": p.get("absolute_timestamp_ms", 0),
+             "audio_offset_bytes": p.get("audio_offset_bytes"),
+             "chunks": [{"time_offset_ms": c.get("time_offset_ms", 0),
+                         "audio_offset_bytes": c.get("audio_offset_bytes", 0)} for c in p.get("chunks", [])]}
+            for p in meta["pages"]]
+    del meta
+    return keep
+
+
+def recording_start(wav: Path, meta=None):
+    """Clock time the recording began: from the .json sidecar, else from the file name."""
+    meta = load_meta(wav) if meta is None else meta
+    ms = meta.get("recording_start_ms")
+    if ms:
+        return datetime.fromtimestamp(ms / 1000)
     m = re.search(r"pendant_(\d{8}_\d{6})", wav.name)
     return datetime.strptime(m.group(1), "%Y%m%d_%H%M%S") if m else None
 
@@ -101,10 +121,62 @@ def read_wav(wav: Path):
         frames = w.readframes(w.getnframes())
     if (rate, channels, width) != (16000, 1, 2):
         raise ValueError(f"expected 16 kHz mono 16-bit WAV, got {rate} Hz, {channels} ch, {8 * width}-bit")
-    return np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
+    audio = np.frombuffer(frames, dtype="<i2").astype(np.float32)
+    del frames
+    audio /= 32768.0  # in place: no second full-size copy
+    return audio
 
 
-def clock_for(wav: Path, duration: float):
+WINDOW_SECONDS = 600   # transcribe long recordings in pieces of about this length
+CUT_SEARCH_SECONDS = 20  # ...cut at the quietest moment in the last this-many seconds of each
+
+
+def wav_seconds(wav: Path) -> float:
+    import wave
+    with wave.open(str(wav), "rb") as w:
+        return w.getnframes() / float(w.getframerate() or 16000)
+
+
+def wav_windows(wav: Path, seconds=WINDOW_SECONDS, search=CUT_SEARCH_SECONDS):
+    """Yield (offset in seconds, float32 samples) pieces of a 16 kHz mono 16-bit WAV.
+
+    Memory stays at one piece however long the recording is (a whole evening is over
+    500 MB of WAV, more than a Pi can hold in the form the model wants). Each cut is
+    made at the quietest quarter-second near the end of the piece, so words aren't split.
+    """
+    import wave
+    import numpy as np
+
+    rate = 16000
+    with wave.open(str(wav), "rb") as w:
+        if (w.getframerate(), w.getnchannels(), w.getsampwidth()) != (rate, 1, 2):
+            raise ValueError(f"expected 16 kHz mono 16-bit WAV, got {w.getframerate()} Hz, "
+                             f"{w.getnchannels()} ch, {8 * w.getsampwidth()}-bit")
+        size, block = int(seconds * rate), rate // 4
+        carry = np.zeros(0, dtype="<i2")
+        offset = 0
+        while True:
+            new = np.frombuffer(w.readframes(size - len(carry)), dtype="<i2")
+            buf = np.concatenate([carry, new]) if len(carry) else new
+            if len(buf) == 0:
+                return
+            if len(buf) < size or w.tell() >= w.getnframes():
+                piece = buf.astype(np.float32)
+                piece /= 32768.0
+                yield offset / rate, piece
+                return
+            lo = max(len(buf) - int(search * rate), block)
+            tail = buf[lo:lo + ((len(buf) - lo) // block) * block].astype(np.float32).reshape(-1, block)
+            cut = lo + int(np.argmin((tail ** 2).mean(axis=1))) * block + block // 2
+            piece = buf[:cut].astype(np.float32)
+            piece /= 32768.0
+            carry, offset = buf[cut:].copy(), offset + cut
+            del buf, new, tail
+            yield (offset - cut) / rate, piece
+            del piece
+
+
+def clock_for(wav: Path, duration: float, meta=None):
     """A function giving the real clock time (datetime) of a moment `t` seconds into the WAV.
 
     The pendant records only while it hears speech, so a recording is stretches with gaps.
@@ -114,12 +186,9 @@ def clock_for(wav: Path, duration: float):
     """
     import bisect
 
-    start = recording_start(wav)
+    meta = load_meta(wav) if meta is None else meta
+    start = recording_start(wav, meta)
     anchors = []
-    try:
-        meta = json.loads(wav.with_suffix(".json").read_text())
-    except (OSError, ValueError):
-        meta = {}
     if meta.get("timeline"):
         anchors = [(float(s), int(ms)) for s, ms in meta["timeline"]]
     elif meta.get("pages") and meta.get("total_audio_bytes") and duration:
@@ -143,6 +212,22 @@ def clock_for(wav: Path, duration: float):
     return at
 
 
+STARS_RE = re.compile(r'"stars_ms":\s*(\[[^\]]*\])')
+
+
+def _stars_in(meta_path: Path):
+    """stars_ms from a .json, found by its key so a huge file isn't parsed whole."""
+    try:
+        text = meta_path.read_text()
+    except OSError:
+        return []
+    m = STARS_RE.search(text)
+    try:
+        return json.loads(m.group(1)) if m else []
+    except ValueError:
+        return []
+
+
 def stars_for(wav: Path):
     """Star times (datetimes) from every sync's metadata for that day.
 
@@ -152,11 +237,11 @@ def stars_for(wav: Path):
     for meta in sorted(wav.parent.glob("pendant_*.json")):
         if meta.name.endswith(".words.json"):
             continue
-        try:
-            for ms in json.loads(meta.read_text()).get("stars_ms", []):
+        for ms in _stars_in(meta):
+            try:
                 stars.append(datetime.fromtimestamp(ms / 1000))
-        except (OSError, ValueError):
-            continue
+            except (TypeError, ValueError, OverflowError):
+                continue
     return sorted(set(stars))
 
 
@@ -173,37 +258,42 @@ def _write_atomic(path: Path, text: str):
 
 def transcribe_one(model, wav: Path):
     """Transcribe one WAV. Returns (seconds of audio, number of speech lines)."""
-    start = recording_start(wav)
+    meta = load_meta(wav)
+    start = recording_start(wav, meta)
     stars = stars_for(wav)
-    audio = read_wav(wav)
-    clock = clock_for(wav, len(audio) / 16000)
-    segments, info = model.transcribe(
-        audio, language="en", beam_size=BEAM, vad_filter=True,
-        condition_on_previous_text=False,
-    )
+    duration = wav_seconds(wav)
+    clock = clock_for(wav, duration, meta)
+    del meta
     lines, words = [], []
-    for seg in segments:
-        text = seg.text.strip()
-        if not text:
-            continue
-        at = clock(seg.start)
-        stamp = at.strftime("%H:%M:%S") if at else _clock(seg.start)
-        starred = _starred(at, stars)
-        lines.append(f"{STAR + ' ' if starred else ''}[{stamp}] {text}")
-        words.append({
-            "start": round(seg.start, 2), "end": round(seg.end, 2),
-            "at": at.isoformat(timespec="seconds") if at else None, "text": text,
-            "starred": starred,
-        })
+    for offset, audio in wav_windows(wav, WINDOW_SECONDS, CUT_SEARCH_SECONDS):
+        segments, _ = model.transcribe(
+            audio, language="en", beam_size=BEAM, vad_filter=True,
+            condition_on_previous_text=False,
+        )
+        for seg in segments:
+            text = seg.text.strip()
+            if not text:
+                continue
+            t0, t1 = seg.start + offset, seg.end + offset
+            at = clock(t0)
+            stamp = at.strftime("%H:%M:%S") if at else _clock(t0)
+            starred = _starred(at, stars)
+            lines.append(f"{STAR + ' ' if starred else ''}[{stamp}] {text}")
+            words.append({
+                "start": round(t0, 2), "end": round(t1, 2),
+                "at": at.isoformat(timespec="seconds") if at else None, "text": text,
+                "starred": starred,
+            })
+        del audio
     # Write the JSON first: the .txt is what marks a recording as done.
     _write_atomic(wav.with_suffix(".words.json"), json.dumps({
         "recording": wav.name, "model": MODEL,
         "recording_start": start.isoformat(timespec="seconds") if start else None,
-        "duration": round(getattr(info, "duration", 0.0), 1),
+        "duration": round(duration, 1),
         "stars": [t.isoformat(timespec="seconds") for t in stars], "segments": words,
     }, indent=1))
     _write_atomic(wav.with_suffix(".txt"), ("\n".join(lines) if lines else NO_SPEECH) + "\n")
-    return getattr(info, "duration", 0.0), len(lines)
+    return duration, len(lines)
 
 
 def _clock(seconds):
