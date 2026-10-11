@@ -303,7 +303,7 @@ index fb98890..4c861ff 100644
  # Register command groups
  cli.add_command(bluetooth.bt)
 diff --git a/src/pendant/commands/audio.py b/src/pendant/commands/audio.py
-index cf0b2e6..b56ad28 100644
+index cf0b2e6..ddf9024 100644
 --- a/src/pendant/commands/audio.py
 +++ b/src/pendant/commands/audio.py
 @@ -1,6 +1,8 @@
@@ -356,7 +356,7 @@ index cf0b2e6..b56ad28 100644
  
      def start_download():
          click.echo("\nDownloading audio (this may take a while)...")
-@@ -42,8 +52,144 @@ def download(ctx, decode, output):
+@@ -42,8 +52,163 @@ def download(ctx, decode, output):
          return False
  
      GLib.timeout_add_seconds(2, start_download)
@@ -494,6 +494,25 @@ index cf0b2e6..b56ad28 100644
 +    return problems
 +
 +
++def session_summary(page_sessions):
++    """Per recording session on the pendant: first and last page, pages, unreadable pages.
++
++    Kept with each recording so that if a block of pages turns up unreadable again, its
++    session can be compared with the sessions around it.
++    """
++    out = {}
++    for index, session, run, bad in page_sessions:
++        key = str(session)
++        s = out.setdefault(key, {"session": session, "runs": [], "first_page": index, "last_page": index,
++                                 "pages": 0, "unreadable": 0})
++        s["first_page"], s["last_page"] = min(s["first_page"], index), max(s["last_page"], index)
++        s["pages"] += 1
++        s["unreadable"] += int(bool(bad))
++        if run is not None and run not in s["runs"]:
++            s["runs"].append(run)
++    return sorted(out.values(), key=lambda s: s["first_page"])
++
++
 +def _save_and_free(client, decode, output_dir, delete_after):
 +    """Write the downloaded audio to disk, then (optionally) free those pages on the pendant.
 +
@@ -503,7 +522,7 @@ index cf0b2e6..b56ad28 100644
  
      # Save audio
      click.echo(f"\n\nDownload complete!")
-@@ -72,26 +218,48 @@ def download(ctx, decode, output):
+@@ -72,26 +237,48 @@ def download(ctx, decode, output):
          timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
  
      opus_fname = None
@@ -560,7 +579,7 @@ index cf0b2e6..b56ad28 100644
          # Check if timestamps are real (synced) or just device uptime
          first_ts = client.page_timestamps[0].get("absolute_timestamp_ms", 0) if client.page_timestamps else 0
          timestamps_synced = first_ts > MIN_VALID_TIMESTAMP_MS
-@@ -102,25 +270,210 @@ def download(ctx, decode, output):
+@@ -102,25 +289,214 @@ def download(ctx, decode, output):
              "download_time_iso": datetime.now().isoformat(),
              "timestamps_synced": timestamps_synced,
              "total_pages": client.page_count,
@@ -569,6 +588,7 @@ index cf0b2e6..b56ad28 100644
 +            "page_last": max(client.page_indices) if client.page_indices else None,
 +            "page_count": len(set(client.page_indices)),
 +            "bad_pages": sorted(set(getattr(client, "bad_page_indices", []))),
++            "sessions": session_summary(getattr(client, "page_sessions", [])),
 +            "audio_key_id": _key_id(client),
              "total_audio_bytes": len(client.opus_data),
 -            "pages": client.page_timestamps
@@ -587,6 +607,9 @@ index cf0b2e6..b56ad28 100644
 +    if client.page_count:
 +        lo, hi = min(client.page_indices), max(client.page_indices)
 +        click.echo(f"  Page indexes: {lo} to {hi}" + (f" ({client.page_errors} flagged unreadable)" if client.page_errors else ""))
++        for sess in session_summary(getattr(client, "page_sessions", [])):
++            click.echo(f"  Session {sess['session']}: pages {sess['first_page']}-{sess['last_page']}, {sess['pages']} received"
++                       + (f", {sess['unreadable']} unreadable" if sess["unreadable"] else ""))
 +    if delete_after and undecrypted:
 +        click.echo("Some audio couldn't be decrypted, so nothing will be deleted from the pendant. "
 +                   "It's all still there, and saved here too.")
@@ -1508,7 +1531,7 @@ index 5278f23..ca072c2 100644
          elif rtype == "battery_status":
              print(f"\n  Battery: {response.get('level', 0)}%")
 diff --git a/src/pendant/core/dbus_client.py b/src/pendant/core/dbus_client.py
-index a5867ef..6a0e6f9 100644
+index a5867ef..f98698b 100644
 --- a/src/pendant/core/dbus_client.py
 +++ b/src/pendant/core/dbus_client.py
 @@ -1,10 +1,11 @@
@@ -1524,7 +1547,7 @@ index a5867ef..6a0e6f9 100644
  from .bluetooth import ensure_connected
  
  
-@@ -27,11 +28,20 @@ class DBusClient:
+@@ -27,11 +28,21 @@ class DBusClient:
          self.opus_data = bytearray()
          self.pcm_data = bytearray()
          self.encrypted_data = bytearray()
@@ -1540,12 +1563,13 @@ index a5867ef..6a0e6f9 100644
 +        self.page_errors = 0  # pages the pendant flagged as unreadable
 +        self.bad_page_indices = []  # which ones
 +        self.bad_pages = {}  # index -> what the pendant sent for it, kept whole (see audio.py)
++        self.page_sessions = []  # (index, session, run, flagged unreadable) for every page received
 +        self.device_info = None  # most recent device_info reply (oldest/newest page)
 +        self.last_page_time = None  # time.monotonic() of the latest page
  
      def _init_dbus(self):
          """Initialize D-Bus connection."""
-@@ -74,22 +84,25 @@ class DBusClient:
+@@ -74,22 +85,25 @@ class DBusClient:
          self.responses.append(rtype)
  
          if rtype == "device_info":
@@ -1579,12 +1603,14 @@ index a5867ef..6a0e6f9 100644
              print(f"\n  Battery: {response.get('level', 0)}%")
              if response.get('charging'):
                  print(f"  Charging: yes")
-@@ -99,11 +112,24 @@ class DBusClient:
+@@ -99,11 +113,26 @@ class DBusClient:
  
          elif rtype == "storage_buffer":
              self.page_count += 1
 +            self.last_page_time = time.monotonic()
 +            self.page_indices.append(response.get("index", 0))
++            self.page_sessions.append((response.get("index", 0), response.get("session"), response.get("run"),
++                                       bool(response.get("error"))))
              flash_page = response.get("flash_page", b"")
 +            if response.get("error"):
 +                self.page_errors += 1
@@ -1604,7 +1630,7 @@ index a5867ef..6a0e6f9 100644
                  # Track audio offset for this page
                  page_info["audio_offset_bytes"] = len(self.opus_data)
                  self.page_timestamps.append(page_info)
-@@ -114,12 +140,26 @@ class DBusClient:
+@@ -114,12 +143,26 @@ class DBusClient:
                  enc_str = f" enc={len(self.encrypted_data)}B" if self.encrypted_data else ""
                  print(f"\r  Page {self.page_count}: opus={len(self.opus_data)}B pcm={len(self.pcm_data)}B{enc_str}", end="", flush=True)
  
@@ -1632,7 +1658,7 @@ index a5867ef..6a0e6f9 100644
      def check_connection(self) -> bool:
          """Check if device is connected."""
          try:
-@@ -211,13 +251,41 @@ class DBusClient:
+@@ -211,13 +254,41 @@ class DBusClient:
          if self.loop:
              self.loop.quit()
  
@@ -2960,10 +2986,10 @@ index 0000000..6bdd2af
 +    assert c.sent == []
 diff --git a/tests/test_unreadable_pages.py b/tests/test_unreadable_pages.py
 new file mode 100644
-index 0000000..e43c035
+index 0000000..67d5f9d
 --- /dev/null
 +++ b/tests/test_unreadable_pages.py
-@@ -0,0 +1,203 @@
+@@ -0,0 +1,231 @@
 +"""A page the pendant can't read must not stop freeing for good (Oct 10: pages 6055-6473)."""
 +import json
 +
@@ -3167,3 +3193,31 @@ index 0000000..e43c035
 +    assert "  Sync mode: real-time" in format_status_lines(_status_dict(st))
 +    st.sync_mode = 0
 +    assert "  Sync mode: off" in format_status_lines(_status_dict(st))
++
++
++def test_sessions_recorded_for_every_page(tmp_path):
++    import json
++    from pendant.core.dbus_client import DBusClient
++    c = DBusClient("AA:BB:CC:DD:EE:FF")
++    for i in range(3855, 3858):
++        c._handle_response({"type": "storage_buffer", "index": i, "session": 1147, "run": 0,
++                            "seq": i, "flash_page": b"", "error": 1})
++    for i in range(3858, 3860):
++        c._handle_response({"type": "storage_buffer", "index": i, "session": 1148, "run": 2,
++                            "seq": i, "flash_page": b"", "error": 0})
++    from pendant.commands.audio import session_summary
++    assert session_summary(c.page_sessions) == [
++        {"session": 1147, "runs": [0], "first_page": 3855, "last_page": 3857, "pages": 3, "unreadable": 3},
++        {"session": 1148, "runs": [2], "first_page": 3858, "last_page": 3859, "pages": 2, "unreadable": 0},
++    ]
++
++
++def test_sessions_saved_in_metadata(tmp_path, capsys):
++    import json
++    c = bad_client([10, 11, 12], bad=[10])
++    c.page_sessions = [(10, 7, 0, True), (11, 8, 0, False), (12, 8, 1, False)]
++    _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=False)
++    meta = json.loads(next(tmp_path.glob("*.json")).read_text())
++    assert [s["session"] for s in meta["sessions"]] == [7, 8]
++    assert meta["sessions"][1]["runs"] == [0, 1]
++    assert "Session 7: pages 10-10, 1 received, 1 unreadable" in capsys.readouterr().out
