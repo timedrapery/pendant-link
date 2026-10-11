@@ -307,7 +307,7 @@ index fb98890..4c861ff 100644
  # Register command groups
  cli.add_command(bluetooth.bt)
 diff --git a/src/pendant/commands/audio.py b/src/pendant/commands/audio.py
-index cf0b2e6..824b5fc 100644
+index cf0b2e6..92d9910 100644
 --- a/src/pendant/commands/audio.py
 +++ b/src/pendant/commands/audio.py
 @@ -1,6 +1,8 @@
@@ -360,7 +360,7 @@ index cf0b2e6..824b5fc 100644
  
      def start_download():
          click.echo("\nDownloading audio (this may take a while)...")
-@@ -42,8 +52,205 @@ def download(ctx, decode, output):
+@@ -42,8 +52,210 @@ def download(ctx, decode, output):
          return False
  
      GLib.timeout_add_seconds(2, start_download)
@@ -565,10 +565,15 @@ index cf0b2e6..824b5fc 100644
 +    Returns what happened with freeing, for the health file.
 +    """
 +    freeing = {"freed": False, "reason": None, "unreadable_pages_waiting": 0}
++    arrived = (getattr(client, "first_status", None) or {}).get("sync_mode_label")
++    if arrived:
++        # Each session switches batch mode off when it's done; this shows whether the pendant
++        # stayed that way between syncs (it costs battery if it doesn't).
++        click.echo(f"  Pendant's sync mode when this sync arrived: {arrived}")
  
      # Save audio
      click.echo(f"\n\nDownload complete!")
-@@ -72,26 +279,48 @@ def download(ctx, decode, output):
+@@ -72,26 +284,48 @@ def download(ctx, decode, output):
          timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
  
      opus_fname = None
@@ -625,7 +630,7 @@ index cf0b2e6..824b5fc 100644
          # Check if timestamps are real (synced) or just device uptime
          first_ts = client.page_timestamps[0].get("absolute_timestamp_ms", 0) if client.page_timestamps else 0
          timestamps_synced = first_ts > MIN_VALID_TIMESTAMP_MS
-@@ -102,25 +331,223 @@ def download(ctx, decode, output):
+@@ -102,25 +336,224 @@ def download(ctx, decode, output):
              "download_time_iso": datetime.now().isoformat(),
              "timestamps_synced": timestamps_synced,
              "total_pages": client.page_count,
@@ -818,6 +823,7 @@ index cf0b2e6..824b5fc 100644
 +        "storage_used_percent": (client.last_status or {}).get("storage_used_percent"),
 +        "recording": (client.last_status or {}).get("recording_label"),
 +        "sync_mode": (client.last_status or {}).get("sync_mode_label"),
++        "sync_mode_on_arrival": (getattr(client, "first_status", None) or {}).get("sync_mode_label"),
 +    }
 +    if freeing is not None and client.page_count:
 +        if freeing.get("freed"):
@@ -3129,10 +3135,10 @@ index 0000000..6bdd2af
 +    assert c.sent == []
 diff --git a/tests/test_unreadable_pages.py b/tests/test_unreadable_pages.py
 new file mode 100644
-index 0000000..38b2132
+index 0000000..5c07b1a
 --- /dev/null
 +++ b/tests/test_unreadable_pages.py
-@@ -0,0 +1,274 @@
+@@ -0,0 +1,287 @@
 +"""A page the pendant can't read must not stop freeing for good (Oct 10: pages 6055-6473)."""
 +import json
 +
@@ -3407,3 +3413,16 @@ index 0000000..38b2132
 +    cmd = pb.ServerCommandMsg(); cmd.ParseFromString(env.payload)
 +    assert cmd.WhichOneof("content") == "set_vad_threshold" and cmd.set_vad_threshold.vad_threshold_ms == 1500
 +    assert cmd.set_vad_threshold.SerializeToString() == b"\x08\xdc\x0b"   # field 1, varint 1500
++
++
++def test_mode_on_arrival_logged_and_in_health(tmp_path, capsys):
++    import json
++    inc = tmp_path / ".incoming"
++    inc.mkdir()
++    c = bad_client([1, 2, 3], bad=[])
++    c.first_status = {"sync_mode_label": "sending recordings (batch)", "oldest_flash_page": 1}
++    c.last_battery = {"level": 90}
++    freeing = _save_and_free(c, decode=False, output_dir=inc, delete_after=True)
++    write_health(c, inc, None, freeing)
++    assert "when this sync arrived: sending recordings (batch)" in capsys.readouterr().out
++    assert json.loads((tmp_path / "pendant-health.json").read_text())["sync_mode_on_arrival"] == "sending recordings (batch)"
