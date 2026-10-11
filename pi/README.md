@@ -315,7 +315,7 @@ pendant crypto export
 
 Copy everything from `-----BEGIN PENDANT KEYS-----` to `-----END PENDANT KEYS-----` into your password manager or vault. Do it again after any `pendant crypto setkey` (for example after a factory reset). See [Restoring onto a new Pi](#restoring-onto-a-new-pi).
 
-**Check the backup** now and then. This copies nothing: it compares every file on the Pi with its encrypted copy on Drive, by checksum, without downloading:
+**Check the backup** now and then. This copies nothing: it compares every file on the Pi, as of the last backup, with its encrypted copy on Drive, by checksum, without downloading. Files newer than the last backup (today's recordings, and the status files each sync rewrites) are counted but not checked, since they go up with the next one:
 
 ```
 pendant backup --check
@@ -406,7 +406,7 @@ What you need from outside the Pi: the `PENDANT KEYS` block from your password m
 | `pendant transcribe --tidy` | Delete old WAVs now and show free space |
 | `pendant decode <file>.opus` | Rebuild a WAV to listen to |
 | `pendant backup` | Back up now |
-| `pendant backup --check` | Check every file is in the backup, intact (downloads nothing) |
+| `pendant backup --check` | Check everything as of the last backup is in it, intact (downloads nothing) |
 | `pendant crypto export` | Print your keys and backup passwords as one block for your password manager |
 | `pendant led 0` | Light off (`100` is full) |
 | `pendant crypto status` | Which keys are set up |
