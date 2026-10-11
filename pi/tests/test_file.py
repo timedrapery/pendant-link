@@ -165,3 +165,26 @@ def test_no_half_filed_leftovers(dirs):
     rec(inc, 1, 10)
     pf.file_incoming(inc, arc)
     assert not list(day.glob("*.filing"))
+
+
+def test_tidy_waits_for_a_running_transcription(dirs):
+    import fcntl
+    inc, arc, day = dirs
+    rec(day, 1, 10, audio=b"A" * 100)
+    rec(day, 1, 20, audio=b"A" * 100 + b"B" * 100, base=f"{BASE}_r1")
+    lock = open(arc / ".transcribe.lock", "w")
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    assert pf.tidy(arc) is False
+    assert len(pf.copies(day, BASE)) == 2            # nothing touched
+    lock.close()
+    assert pf.tidy(arc) is True
+    assert pf.copies(day, BASE) == [BASE]
+
+
+def test_tidy_clears_an_unfinished_copy(dirs):
+    inc, arc, day = dirs
+    rec(day, 1, 10, audio=b"A" * 100)
+    (day / f"{BASE}.wav.filing").write_bytes(b"half")
+    pf.tidy(arc)
+    assert not list(day.glob("*.filing"))
+    assert (day / f"{BASE}.wav").exists()

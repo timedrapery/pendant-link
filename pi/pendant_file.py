@@ -21,6 +21,7 @@ Usage:
                                                   all the others and move the rest aside
 """
 
+import fcntl
 import hashlib
 import json
 import re
@@ -176,9 +177,51 @@ def file_incoming(incoming: Path, archive: Path):
         _place(incoming, base, day, target)
 
 
+def _hold_locks(archive: Path):
+    """Take the sync and transcription locks, or None if either is running right now."""
+    held = []
+    for name in (".sync.lock", ".transcribe.lock"):
+        f = open(archive / name, "a")
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            f.close()
+            for g in held:
+                g.close()
+            return None
+        held.append(f)
+    return held
+
+
+def remove_leftovers(day: Path):
+    """A .filing file is a copy that never finished; its source is still in place, so it can go."""
+    for f in day.glob("*.filing"):
+        f.unlink()
+        _log(f"removed {day.name}/{f.name}, an unfinished copy from an interrupted run")
+
+
 def tidy(archive: Path, dry_run=False):
-    """For each recording filed more than once, keep the copy that provably holds all the others."""
+    """For each recording filed more than once, keep the copy that provably holds all the others.
+
+    Refuses while a sync or a transcription is running, since either may be using these files.
+    """
+    locks = _hold_locks(archive)
+    if locks is None:
+        _log("A sync or a transcription is running right now. Try again when it's finished "
+             "(stop transcription with: systemctl --user stop pendant-transcribe.service).")
+        return False
+    try:
+        _tidy(archive, dry_run)
+    finally:
+        for f in locks:
+            f.close()
+    return True
+
+
+def _tidy(archive: Path, dry_run):
     for day in sorted(archive.glob("[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]")):
+        if not dry_run:
+            remove_leftovers(day)
         bases = sorted({m.group(1) for p in day.glob("pendant_*_r*.opus") if (m := COPY_RE.match(p.name[:-5]))})
         for base in bases:
             names = copies(day, base)
@@ -207,7 +250,7 @@ def tidy(archive: Path, dry_run=False):
 if __name__ == "__main__":
     args = sys.argv[1:]
     if args[:1] == ["--tidy"] and len(args) in (2, 3) and args[2:] in ([], ["--dry-run"]):
-        tidy(Path(args[1]), dry_run=args[2:] == ["--dry-run"])
+        sys.exit(0 if tidy(Path(args[1]), dry_run=args[2:] == ["--dry-run"]) else 1)
     elif len(args) == 2 and not args[0].startswith("-"):
         file_incoming(Path(args[0]), Path(args[1]))
     else:
