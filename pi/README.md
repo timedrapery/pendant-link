@@ -451,7 +451,7 @@ What you need from outside the Pi: the `PENDANT KEYS` block from your password m
 | The browse page won't open | Use the numbered address the installer printed (`hostname -I` shows it) if `.local` doesn't work on your phone. Check it's running: `systemctl --user status pendant-web --no-pager`. |
 | The light came back on | Run `pendant led 0` again. |
 | Many copies of one recording (`_r1`, `_r2`, ...) | Pages weren't being freed, so each sync downloaded them again. Check why with `grep -a "nothing will be deleted" ~/recordings/sync.log \| tail -3`, update (step 6), then tidy the copies (see "When pages are downloaded twice" in step 6). |
-| `The first page (...) was unreadable` | The pendant can't read that page. After 3 syncs (about 45 minutes) freeing goes past it, with what it sent saved in a `.badpages.jsonl` file. |
+| `The first page (...) was unreadable` | Usually pages this Pi already saved and freed: the pendant erases them but keeps listing them for a while. Those are recognised and skipped ("already saved and freed by an earlier sync"). Any other unreadable page is retried; after 3 syncs freeing goes past it, with what the pendant sent saved in a `.badpages.jsonl` file. |
 | "Getting full" in `transcribe.log` | Lower `PENDANT_KEEP_WAV_DAYS` in `~/.config/pendant/env`, or move old day folders off the Pi (they're in the backup if you set it up). |
 
 ## Uninstall
@@ -468,7 +468,7 @@ That leaves your recordings (`~/recordings`) and keys (`~/.config/pendant`) alon
 
 ## What the pendant-cli patch changes
 
-`pendant-cli-fixes.patch` fixes how [pendant-cli](https://github.com/sdelcore/pendant-cli) reads the pendant and adds what this guide uses. Message layouts come from the Limitless Android app. It applies cleanly to upstream commit `1c71659`, which the installer checks out so the code you run is the code that was tested, and passes pendant-cli's tests (136, including 39 for the page-freeing logic and 23 for encryption and keys). The installer in step 6 applies it; it resets pendant-cli to its original files first (removing files an earlier version of the patch added), and only updates its own two lines in `~/.config/pendant/env`, so it's safe to rerun. Your own changes to pendant-cli's files, if any, would be lost.
+`pendant-cli-fixes.patch` fixes how [pendant-cli](https://github.com/sdelcore/pendant-cli) reads the pendant and adds what this guide uses. Message layouts come from the Limitless Android app. It applies cleanly to upstream commit `1c71659`, which the installer checks out so the code you run is the code that was tested, and passes pendant-cli's tests (140, including 39 for the page-freeing logic and 23 for encryption and keys). The installer in step 6 applies it; it resets pendant-cli to its original files first (removing files an earlier version of the patch added), and only updates its own two lines in `~/.config/pendant/env`, so it's safe to rerun. Your own changes to pendant-cli's files, if any, would be lost.
 
 **Reading the pendant correctly**
 - **Recording status** shows the real state: not recording, recording, or listening (armed to record when it hears speech), which pendant-cli used to print as `False`.

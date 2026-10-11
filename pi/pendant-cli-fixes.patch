@@ -116,7 +116,7 @@ index e21933f..d005482 100644
  
              # Sync dependencies with uv
 diff --git a/proto/pendant.proto b/proto/pendant.proto
-index 22b2dea..2d6f4f0 100644
+index 22b2dea..49d9cc5 100644
 --- a/proto/pendant.proto
 +++ b/proto/pendant.proto
 @@ -69,11 +69,13 @@ message ServerCommandMsg {
@@ -135,9 +135,13 @@ index 22b2dea..2d6f4f0 100644
  message DownloadFlashPages {
    bool batch_mode_enabled = 1;
    bool real_time_mode_enabled = 2;
-@@ -95,8 +97,10 @@ message SetServerInfo { string server_url = 1; }
+@@ -93,10 +95,13 @@ message ConnectToBackend {}
+ message GetDeviceStatus {}
+ message SetServerInfo { string server_url = 1; }
  message DisconnectWifi {}
- message SetVADThreshold { float threshold = 1; }
+-message SetVADThreshold { float threshold = 1; }
++// Layout from the Limitless app (ServerProto$SetVADThreshold): a whole number of milliseconds.
++message SetVADThreshold { int32 vad_threshold_ms = 1; }
  message ClearPendantStorage {}
 +// 0 (off) to 100, as in the Limitless app; the pendant answers with DeviceStatus.
  message SetLEDBrightness { int32 brightness = 1; }
@@ -146,7 +150,7 @@ index 22b2dea..2d6f4f0 100644
  message SetServerPublicKey { bytes public_key = 1; }
  message PrepareForFirmwareUpdate {}
  message SyncFirmwareUpdateState {}
-@@ -124,12 +128,24 @@ message PendantAllMsg {
+@@ -124,12 +129,24 @@ message PendantAllMsg {
    optional ResponseData response_data = 6;
  }
  
@@ -176,7 +180,7 @@ index 22b2dea..2d6f4f0 100644
  }
  
  message StorageBufferMsg {
-@@ -152,11 +168,13 @@ enum RecordingState {
+@@ -152,11 +169,13 @@ enum RecordingState {
    RECORDING_STATE_LISTENING = 2;
  }
  
@@ -193,7 +197,7 @@ index 22b2dea..2d6f4f0 100644
  }
  
  // StorageState for DeviceStatus (different from StorageStatus in Chunk)
-@@ -212,10 +230,29 @@ message BatteryStatus {
+@@ -212,10 +231,29 @@ message BatteryStatus {
    bool under_operating_temperature = 8;
    UsbState usb_state = 9;
  }
@@ -225,7 +229,7 @@ index 22b2dea..2d6f4f0 100644
  
  enum IngestType {
    INGEST_TYPE_UNSPECIFIED = 0;
-@@ -258,10 +295,18 @@ message Chunk {
+@@ -258,10 +296,18 @@ message Chunk {
  }
  
  // Additional status messages for Chunk
@@ -247,7 +251,7 @@ index 22b2dea..2d6f4f0 100644
  }
  
  message BleStatus {
-@@ -304,10 +349,12 @@ message PendantAudioData {
+@@ -304,10 +350,12 @@ message PendantAudioData {
    EncryptedBytes encrypted_codec_beamforming_data = 13;
  }
  
@@ -303,7 +307,7 @@ index fb98890..4c861ff 100644
  # Register command groups
  cli.add_command(bluetooth.bt)
 diff --git a/src/pendant/commands/audio.py b/src/pendant/commands/audio.py
-index cf0b2e6..ddf9024 100644
+index cf0b2e6..824b5fc 100644
 --- a/src/pendant/commands/audio.py
 +++ b/src/pendant/commands/audio.py
 @@ -1,6 +1,8 @@
@@ -356,7 +360,7 @@ index cf0b2e6..ddf9024 100644
  
      def start_download():
          click.echo("\nDownloading audio (this may take a while)...")
-@@ -42,8 +52,163 @@ def download(ctx, decode, output):
+@@ -42,8 +52,205 @@ def download(ctx, decode, output):
          return False
  
      GLib.timeout_add_seconds(2, start_download)
@@ -404,6 +408,48 @@ index cf0b2e6..ddf9024 100644
 +        return max(1, int(os.environ.get("PENDANT_BAD_PAGE_TRIES", BAD_PAGE_TRIES)))
 +    except ValueError:
 +        return BAD_PAGE_TRIES
++
++
++FREED_FILE = ".pendant-freed.json"
++
++
++def load_freed(root):
++    """The last page this Pi freed on the pendant, and the oldest page the pendant reported
++    then, or None."""
++    try:
++        rec = json.loads((Path(root) / FREED_FILE).read_text())
++        return int(rec["through"]), int(rec["oldest_then"])
++    except (OSError, ValueError, KeyError, TypeError):
++        return None
++
++
++def save_freed(root, through, oldest):
++    path = Path(root) / FREED_FILE
++    try:
++        tmp = path.with_name(path.name + ".tmp")
++        tmp.write_text(json.dumps({"through": int(through), "oldest_then": int(oldest),
++                                   "at": datetime.now().isoformat(timespec="seconds")}))
++        tmp.replace(path)
++    except (OSError, TypeError, ValueError):
++        pass
++
++
++def already_freed(root, bad, oldest):
++    """Unreadable pages this Pi already saved and freed in an earlier sync.
++
++    After freeing, the pendant erases the pages but can go on reporting them for a while
++    (its "oldest page" lags behind), and then they read as failed. Seen on Oct 11: freed
++    through 7186, next sync still reported oldest 6549 with 6549-7178 "read failed". Those
++    pages were downloaded, checked on disk and freed already, so they're nothing to retry.
++    Not trusted after a factory reset (page numbers start over, so the oldest page drops).
++    """
++    rec = load_freed(root)
++    if rec is None or oldest is None:
++        return set()
++    through, oldest_then = rec
++    if oldest < oldest_then:
++        return set()
++    return {i for i in bad if i <= through}
 +
 +
 +def update_bad_page_history(root, bad, received):
@@ -522,7 +568,7 @@ index cf0b2e6..ddf9024 100644
  
      # Save audio
      click.echo(f"\n\nDownload complete!")
-@@ -72,26 +237,48 @@ def download(ctx, decode, output):
+@@ -72,26 +279,48 @@ def download(ctx, decode, output):
          timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
  
      opus_fname = None
@@ -579,7 +625,7 @@ index cf0b2e6..ddf9024 100644
          # Check if timestamps are real (synced) or just device uptime
          first_ts = client.page_timestamps[0].get("absolute_timestamp_ms", 0) if client.page_timestamps else 0
          timestamps_synced = first_ts > MIN_VALID_TIMESTAMP_MS
-@@ -102,25 +289,214 @@ def download(ctx, decode, output):
+@@ -102,25 +331,223 @@ def download(ctx, decode, output):
              "download_time_iso": datetime.now().isoformat(),
              "timestamps_synced": timestamps_synced,
              "total_pages": client.page_count,
@@ -622,9 +668,16 @@ index cf0b2e6..ddf9024 100644
 +            click.echo(f"  Pendant reports oldest page {oldest if oldest is not None else 'unknown'}, "
 +                       f"{held if held is not None else 'unknown'} pages held; download starts at {first}.")
 +        tries = _bad_page_tries()
-+        seen = update_bad_page_history(_archive_root(output_dir), bad, client.page_indices) if client.page_indices else {}
-+        # Only pages whose bytes were saved this time, and that failed in enough separate downloads.
-+        settled = {i for i in bad if seen.get(i, 0) >= tries and bad_file_ok and i in bad_pages}
++        root = _archive_root(output_dir)
++        erased = already_freed(root, bad, oldest)
++        if erased:
++            click.echo(f"  Page(s) {_ranges(erased)}: already saved and freed by an earlier sync; the pendant has "
++                       "erased them but still lists them. Nothing to retry.")
++        others = [i for i in bad if i not in erased]
++        seen = update_bad_page_history(root, others, client.page_indices) if client.page_indices else {}
++        # Pages whose bytes were saved this time and that failed in enough separate downloads,
++        # and pages already saved and freed earlier.
++        settled = {i for i in others if seen.get(i, 0) >= tries and bad_file_ok and i in bad_pages} | erased
 +        waiting = sorted(set(bad) - settled)
 +        freeing["unreadable_pages_waiting"] = len(waiting)
 +        if waiting:
@@ -652,7 +705,7 @@ index cf0b2e6..ddf9024 100644
 +            click.echo(refusal)
 +            freeing["reason"] = refusal
 +        else:
-+            passed = sorted(i for i in settled if i <= through)
++            passed = sorted(i for i in settled - erased if i <= through)
 +            if passed:
 +                click.echo(f"Page(s) {_ranges(passed)} failed in {tries} separate downloads, so the pendant can't "
 +                           f"read them either. What it sent for them is saved in the .badpages.jsonl file; "
@@ -688,9 +741,11 @@ index cf0b2e6..ddf9024 100644
 +            if reply is None:
 +                click.echo("Freed (no confirmation from the pendant; the next sync's oldest page will show it).")
 +                freeing["freed"] = True
++                save_freed(root, through, oldest)
 +            elif reply.get("response_success"):
 +                click.echo("Freed (the pendant confirmed).")
 +                freeing["freed"] = True
++                save_freed(root, through, oldest)
 +            else:
 +                click.echo(f"The pendant refused to free pages: {reply.get('response_error')}. Everything stays on it.")
 +                freeing["reason"] = f"the pendant refused: {reply.get('response_error')}"
@@ -1248,6 +1303,54 @@ index e05b050..a56d9ce 100644
 +        click.echo(f"Asked for {brightness}, but the pendant reports {level}.")
 +    else:
 +        click.echo("LED: off" if level == 0 else f"LED brightness: {level}")
+diff --git a/src/pendant/commands/settings.py b/src/pendant/commands/settings.py
+index f18d2f3..3442cc6 100644
+--- a/src/pendant/commands/settings.py
++++ b/src/pendant/commands/settings.py
+@@ -63,18 +63,15 @@ def brightness(ctx, brightness):
+ 
+ 
+ @settings.command()
+-@click.argument('threshold', type=click.FloatRange(0.0, 1.0))
++@click.argument('milliseconds', type=click.IntRange(0, 60000))
+ @click.pass_context
+-def vad(ctx, threshold):
+-    """Set Voice Activity Detection threshold (0.0-1.0).
+-    
+-    Lower values = more sensitive (detects quieter sounds).
+-    Higher values = less sensitive (requires louder sounds).
+-    
+-    Typical values:
+-      0.3 = High sensitivity
+-      0.5 = Default/balanced
+-      0.7 = Low sensitivity
++def vad(ctx, milliseconds):
++    """Set the Voice Activity Detection setting, in milliseconds.
++
++    The Limitless app sends this as a whole number of milliseconds (SetVADThreshold.
++    vad_threshold_ms); `pendant status` shows the current value. What the pendant does with
++    it (how long sound must last before recording starts, or how long recording continues
++    after speech) isn't documented: note the current value first, and change it in small steps.
+     """
+     from gi.repository import GLib
+ 
+@@ -84,13 +81,13 @@ def vad(ctx, threshold):
+     if not client.connect():
+         raise click.ClickException("Failed to connect to device")
+ 
+-    click.echo(f"\nSetting VAD threshold to {threshold}...")
+-    client.send_command("set_vad_threshold", threshold=threshold)
++    click.echo(f"\nSetting VAD threshold to {milliseconds} ms...")
++    client.send_command("set_vad_threshold", threshold_ms=milliseconds)
+ 
+     GLib.timeout_add_seconds(2, lambda: client.stop() or False)
+     client.run_with_timeout(5)
+     client.disconnect()
+-    click.echo("VAD threshold set")
++    click.echo("VAD threshold set. Check it with: pendant status")
+ 
+ 
+ @settings.command()
 diff --git a/src/pendant/commands/sync.py b/src/pendant/commands/sync.py
 new file mode 100644
 index 0000000..b0cd8ad
@@ -1741,10 +1844,10 @@ index 0a797ea..16d9f6b 100644
              offset += frame_size
              frame_count += 1
 diff --git a/src/pendant/core/protocol.py b/src/pendant/core/protocol.py
-index c342f7e..980d255 100644
+index c342f7e..e619619 100644
 --- a/src/pendant/core/protocol.py
 +++ b/src/pendant/core/protocol.py
-@@ -10,12 +10,54 @@ from .config import KEYS_DIR
+@@ -10,12 +10,55 @@ from .config import KEYS_DIR
  DEBUG_MODE = False
  
  
@@ -1766,6 +1869,7 @@ index c342f7e..980d255 100644
 +           "wifi_connected": False, "wifi_label": "unknown",
 +           "led_brightness": status.led_brightness,
 +           "sync_mode": status.sync_mode,
++           "vad_threshold_ms": status.vad_threshold.vad_threshold_ms if status.HasField("vad_threshold") else None,
 +           "sync_mode_label": SYNC_MODE_LABELS.get(status.sync_mode, f"mode {status.sync_mode}")}
 +    if status.HasField("recording_status"):
 +        state = status.recording_status.recording_state
@@ -1799,7 +1903,7 @@ index c342f7e..980d255 100644
  
      def create_ble_message(self, payload: bytes) -> bytes:
          """Wrap a payload in BLE message envelope."""
-@@ -82,6 +124,11 @@ class PendantProtocol:
+@@ -82,6 +125,11 @@ class PendantProtocol:
              dl.real_time_mode_enabled = kwargs.get("realtime", False)
              cmd.download_flash_pages.CopyFrom(dl)
  
@@ -1811,7 +1915,7 @@ index c342f7e..980d255 100644
          elif cmd_type == "set_current_time":
              sct = pb.SetCurrentTime()
              sct.timestamp_ms = kwargs.get("timestamp_ms", int(datetime.now().timestamp() * 1000))
-@@ -111,12 +158,14 @@ class PendantProtocol:
+@@ -111,17 +159,19 @@ class PendantProtocol:
  
          elif cmd_type == "set_led":
              led_msg = pb.SetLed()
@@ -1828,7 +1932,13 @@ index c342f7e..980d255 100644
              cmd.set_led_brightness.CopyFrom(brightness_msg)
  
          elif cmd_type == "set_vad_threshold":
-@@ -166,39 +215,22 @@ class PendantProtocol:
+             vad_msg = pb.SetVADThreshold()
+-            vad_msg.threshold = kwargs.get("threshold", 0.5)
++            vad_msg.vad_threshold_ms = int(kwargs["threshold_ms"])
+             cmd.set_vad_threshold.CopyFrom(vad_msg)
+ 
+         elif cmd_type == "set_device_name":
+@@ -166,39 +216,22 @@ class PendantProtocol:
              if content_type == "device_info":
                  info = msg.device_info
                  result.update({
@@ -1880,7 +1990,7 @@ index c342f7e..980d255 100644
  
              elif content_type == "storage_buffer":
                  buf = msg.storage_buffer
-@@ -232,14 +264,23 @@ class PendantProtocol:
+@@ -232,14 +265,23 @@ class PendantProtocol:
                  })
  
              elif content_type == "button_status":
@@ -1906,7 +2016,7 @@ index c342f7e..980d255 100644
  
              return result
  
-@@ -279,6 +320,17 @@ class PendantProtocol:
+@@ -279,6 +321,17 @@ class PendantProtocol:
                  print(f"\n    FlashPage: ts={page.absolute_timestamp_ms}, uptime={page.boot_uptime_ms}, chunks={len(page.chunks)}")
  
              for i, chunk in enumerate(page.chunks):
@@ -1924,7 +2034,7 @@ index c342f7e..980d255 100644
                  # Chunk is not a oneof - check if audio_data field is populated
                  has_audio = chunk.HasField('audio_data') if hasattr(chunk, 'HasField') else bool(chunk.audio_data.ByteSize())
  
-@@ -339,82 +391,135 @@ class PendantProtocol:
+@@ -339,82 +392,137 @@ class PendantProtocol:
                          if DEBUG_MODE:
                              print(f"        encrypted: ciphertext={len(enc.ciphertext)}B, nonce={len(enc.nonce)}B, tag={len(enc.tag)}B")
  
@@ -2026,6 +2136,8 @@ index c342f7e..980d255 100644
 +        lines.append(f"  Wi-Fi: {st['wifi_label']}")
 +    if st.get("sync_mode_label"):
 +        lines.append(f"  Sync mode: {st['sync_mode_label']}")
++    if st.get("vad_threshold_ms") is not None:
++        lines.append(f"  Speech detection setting: {st['vad_threshold_ms']} ms")
 +    return lines
 +
 +
@@ -2412,6 +2524,28 @@ index 0000000..cc2b137
 +    _, _, key = pendant_and_keys
 +    kid = audiocrypto.key_id(key)
 +    assert len(kid) == 12 and key.hex()[:12] != kid
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+index c56ce46..9d152ac 100644
+--- a/tests/test_cli.py
++++ b/tests/test_cli.py
+@@ -80,14 +80,14 @@ class TestSettingsValidation:
+         assert result.exit_code != 0
+ 
+     def test_vad_range_low(self, runner):
+-        """Test VAD threshold rejects values below 0.0."""
++        """Test VAD setting rejects negative milliseconds."""
+         from pendant.cli import cli
+         
+-        result = runner.invoke(cli, ['settings', 'vad', '--', '-0.1'])
++        result = runner.invoke(cli, ['settings', 'vad', '--', '-1'])
+         assert result.exit_code != 0
+ 
+     def test_vad_range_high(self, runner):
+-        """Test VAD threshold rejects values above 1.0."""
++        """Test VAD setting rejects fractions (the app sends whole milliseconds)."""
+         from pendant.cli import cli
+         
+         result = runner.invoke(cli, ['settings', 'vad', '1.5'])
 diff --git a/tests/test_durable_save.py b/tests/test_durable_save.py
 new file mode 100644
 index 0000000..7423ae6
@@ -2585,9 +2719,18 @@ index 0000000..19d1bf4
 +        crypto.import_archive(buf.getvalue(), tmp_path / "k")
 +    assert not (tmp_path / "escape").exists()
 diff --git a/tests/test_protocol.py b/tests/test_protocol.py
-index ad39d00..20fbd8c 100644
+index ad39d00..488ea96 100644
 --- a/tests/test_protocol.py
 +++ b/tests/test_protocol.py
+@@ -20,7 +20,7 @@ class TestPendantProtocol:
+ 
+     def test_create_command_set_vad_threshold(self, protocol):
+         """Test creating a set_vad_threshold command."""
+-        cmd = protocol.create_command("set_vad_threshold", threshold=0.5)
++        cmd = protocol.create_command("set_vad_threshold", threshold_ms=2000)
+         assert isinstance(cmd, bytes)
+         assert len(cmd) > 0
+ 
 @@ -73,6 +73,8 @@ class TestPendantProtocol:
          assert result is not None
          assert result["type"] == "button_status"
@@ -2986,10 +3129,10 @@ index 0000000..6bdd2af
 +    assert c.sent == []
 diff --git a/tests/test_unreadable_pages.py b/tests/test_unreadable_pages.py
 new file mode 100644
-index 0000000..67d5f9d
+index 0000000..38b2132
 --- /dev/null
 +++ b/tests/test_unreadable_pages.py
-@@ -0,0 +1,231 @@
+@@ -0,0 +1,274 @@
 +"""A page the pendant can't read must not stop freeing for good (Oct 10: pages 6055-6473)."""
 +import json
 +
@@ -3038,7 +3181,9 @@ index 0000000..67d5f9d
 +    assert results == [[], [], [("delete_flash_page", {"index": 19007})]]
 +
 +
-+def test_page_that_reads_fine_later_starts_counting_again(tmp_path):
++def test_page_that_reads_fine_later_starts_counting_again(tmp_path, monkeypatch):
++    from pendant.commands import audio
++    monkeypatch.setattr(audio, "save_freed", lambda *a: None)   # counting only, not the freed record
 +    for _ in range(2):
 +        _save_and_free(bad_client([1, 2, 3], bad=[1]), decode=False, output_dir=tmp_path, delete_after=True)
 +    _save_and_free(bad_client([1, 2, 3], bad=[]), decode=False, output_dir=tmp_path, delete_after=False)
@@ -3221,3 +3366,44 @@ index 0000000..67d5f9d
 +    assert [s["session"] for s in meta["sessions"]] == [7, 8]
 +    assert meta["sessions"][1]["runs"] == [0, 1]
 +    assert "Session 7: pages 10-10, 1 received, 1 unreadable" in capsys.readouterr().out
++
++
++def test_pages_already_freed_are_not_retried(tmp_path):
++    """Oct 11: freed through 7186; the next sync still reported oldest 6549, with
++    6549-7178 read-failed (erased, but still listed). Free past them at once."""
++    c = bad_client(range(6549, 7187), bad=[])
++    _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=True)
++    assert c.sent == [("delete_flash_page", {"index": 7186})]
++    c = bad_client(range(6549, 7300), bad=list(range(6549, 7179)))
++    _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=True)
++    assert c.sent == [("delete_flash_page", {"index": 7299})]
++
++
++def test_unread_pages_beyond_what_was_freed_still_wait(tmp_path):
++    c = bad_client(range(100, 200), bad=[])
++    _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=True)
++    c = bad_client(range(100, 260), bad=list(range(100, 250)))   # 200-249 were never freed
++    _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=True)
++    assert c.sent == [("delete_flash_page", {"index": 199})]      # not past 200: those wait for retries
++
++
++def test_after_factory_reset_old_free_record_is_ignored(tmp_path):
++    c = bad_client(range(7887, 9002), bad=[])
++    _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=True)
++    c = bad_client(range(0, 50), bad=[0])                         # numbering started over
++    _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=True)
++    assert c.sent == []
++
++
++def test_speech_detection_setting_shown_and_encoded_as_the_app_does():
++    from pendant.core.protocol import _status_dict, format_status_lines, PendantProtocol
++    from pendant.core.proto import pb
++    st = pb.DeviceStatus()
++    st.vad_threshold.vad_threshold_ms = 2000
++    assert "  Speech detection setting: 2000 ms" in format_status_lines(_status_dict(st))
++    assert _status_dict(pb.DeviceStatus())["vad_threshold_ms"] is None
++    raw = PendantProtocol().create_command("set_vad_threshold", threshold_ms=1500)
++    env = pb.BLEMessageFromNativeToPendant(); env.ParseFromString(raw)
++    cmd = pb.ServerCommandMsg(); cmd.ParseFromString(env.payload)
++    assert cmd.WhichOneof("content") == "set_vad_threshold" and cmd.set_vad_threshold.vad_threshold_ms == 1500
++    assert cmd.set_vad_threshold.SerializeToString() == b"\x08\xdc\x0b"   # field 1, varint 1500
