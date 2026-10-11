@@ -116,7 +116,7 @@ index e21933f..d005482 100644
  
              # Sync dependencies with uv
 diff --git a/proto/pendant.proto b/proto/pendant.proto
-index 22b2dea..b3051ba 100644
+index 22b2dea..2d6f4f0 100644
 --- a/proto/pendant.proto
 +++ b/proto/pendant.proto
 @@ -69,11 +69,13 @@ message ServerCommandMsg {
@@ -176,7 +176,24 @@ index 22b2dea..b3051ba 100644
  }
  
  message StorageBufferMsg {
-@@ -212,10 +228,29 @@ message BatteryStatus {
+@@ -152,11 +168,13 @@ enum RecordingState {
+   RECORDING_STATE_LISTENING = 2;
+ }
+ 
+-// SyncMode enum for DeviceStatus
++// SyncMode enum for DeviceStatus (numbering from the Limitless app's PendantSyncMode:
++// OFF, BLE_BATCH, BLE_REALTIME, WIFI)
+ enum SyncMode {
+   SYNC_MODE_UNSPECIFIED = 0;
+-  SYNC_MODE_REALTIME = 1;
+-  SYNC_MODE_BATCH = 2;
++  SYNC_MODE_BATCH = 1;
++  SYNC_MODE_REALTIME = 2;
++  SYNC_MODE_WIFI = 3;
+ }
+ 
+ // StorageState for DeviceStatus (different from StorageStatus in Chunk)
+@@ -212,10 +230,29 @@ message BatteryStatus {
    bool under_operating_temperature = 8;
    UsbState usb_state = 9;
  }
@@ -208,7 +225,7 @@ index 22b2dea..b3051ba 100644
  
  enum IngestType {
    INGEST_TYPE_UNSPECIFIED = 0;
-@@ -258,10 +293,18 @@ message Chunk {
+@@ -258,10 +295,18 @@ message Chunk {
  }
  
  // Additional status messages for Chunk
@@ -230,7 +247,7 @@ index 22b2dea..b3051ba 100644
  }
  
  message BleStatus {
-@@ -304,10 +347,12 @@ message PendantAudioData {
+@@ -304,10 +349,12 @@ message PendantAudioData {
    EncryptedBytes encrypted_codec_beamforming_data = 13;
  }
  
@@ -1698,7 +1715,7 @@ index 0a797ea..16d9f6b 100644
              offset += frame_size
              frame_count += 1
 diff --git a/src/pendant/core/protocol.py b/src/pendant/core/protocol.py
-index c342f7e..102e4db 100644
+index c342f7e..980d255 100644
 --- a/src/pendant/core/protocol.py
 +++ b/src/pendant/core/protocol.py
 @@ -10,12 +10,54 @@ from .config import KEYS_DIR
@@ -1713,7 +1730,7 @@ index c342f7e..102e4db 100644
 +# DeviceStatus.sync_mode. Batch mode is a state the pendant stays in (the app switches it
 +# on to fetch recordings and off again); while it's on, the pendant sends pages to anything
 +# that connects.
-+SYNC_MODE_LABELS = {0: "off", 1: "real-time", 2: "sending recordings (batch)"}
++SYNC_MODE_LABELS = {0: "off", 1: "sending recordings (batch)", 2: "real-time", 3: "Wi-Fi"}  # app: PendantSyncMode
 +
 +
 +def _status_dict(status) -> dict:
@@ -2943,10 +2960,10 @@ index 0000000..6bdd2af
 +    assert c.sent == []
 diff --git a/tests/test_unreadable_pages.py b/tests/test_unreadable_pages.py
 new file mode 100644
-index 0000000..eb82c2e
+index 0000000..e43c035
 --- /dev/null
 +++ b/tests/test_unreadable_pages.py
-@@ -0,0 +1,201 @@
+@@ -0,0 +1,203 @@
 +"""A page the pendant can't read must not stop freeing for good (Oct 10: pages 6055-6473)."""
 +import json
 +
@@ -3143,8 +3160,10 @@ index 0000000..eb82c2e
 +    from pendant.core.protocol import _status_dict, format_status_lines
 +    from pendant.core.proto import pb
 +    st = pb.DeviceStatus()
-+    st.sync_mode = 2
++    st.sync_mode = 1   # the app's PendantSyncMode.BLE_BATCH
 +    lines = format_status_lines(_status_dict(st))
 +    assert "  Sync mode: sending recordings (batch)" in lines
++    st.sync_mode = 2
++    assert "  Sync mode: real-time" in format_status_lines(_status_dict(st))
 +    st.sync_mode = 0
 +    assert "  Sync mode: off" in format_status_lines(_status_dict(st))
