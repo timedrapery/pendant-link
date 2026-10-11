@@ -181,7 +181,7 @@ Check it's scheduled: `systemctl --user list-timers` shows **pendant-sync.timer*
 
 **How freeing works, exactly.** After a download, the sync asks the pendant to delete pages only when all of these hold:
 
-- the saved files exist on disk and aren't empty;
+- every saved file is flushed to the card, read back, and identical (size and SHA-256) to what was downloaded, the metadata included, and the folder is flushed so the names survive a power cut;
 - the pendant reported its oldest stored page, and the download started exactly there and covers at least as many pages as it said it held (if the pendant doesn't report its oldest page, coverage can't be proven, so nothing is deleted and the next sync tries again);
 - it deletes only through the end of an unbroken run of pages: if a page went missing in the middle, everything from the gap on stays on the pendant;
 - it stops before any page the pendant flagged as unreadable, or that couldn't be parsed, so that page gets another try next time. What the pendant sent for each such page is saved whole in a `.badpages.jsonl` file next to the recording. A page that fails in 3 separate syncs (`PENDANT_BAD_PAGE_TRIES` in `~/.config/pendant/env` changes the number) is taken to be lost on the pendant too, and freeing goes past it; otherwise one bad page at the front would stop freeing for good and the pendant would slowly fill up. A page that reads fine on a later try starts its count over;
@@ -189,11 +189,13 @@ Check it's scheduled: `systemctl --user list-timers` shows **pendant-sync.timer*
 
 The pendant's reply to the delete request is logged separately: "the pendant confirmed", or "no confirmation", in which case the next sync's reported oldest page shows whether it happened.
 
-**When pages are downloaded twice.** A recording is named after the time of its first page, so if pages weren't freed, the next sync downloads them again under the same name. The new download is compared with every copy already filed under that name before anything is filed: an identical copy is dropped; a filed copy the new one provably holds is moved to `~/recordings/.replaced/` (with its transcript), never deleted. "Provably" means either the filed copy's audio is, byte for byte, the start of the new audio, or both list their pages and the new one covers the old one's range with at least as many pages and as much audio. Copies that can't be proven stay, and the new one is filed beside them with `_r1`, `_r2`, ... added. Filing copies first and removes the incoming file last, so an interruption never leaves zero copies.
+**When pages are downloaded twice.** A recording is named after the time of its first page, so if pages weren't freed, the next sync downloads them again under the same name. The new download is compared with every copy already filed under that name before anything is filed: an identical copy is dropped; a filed copy whose audio is, byte for byte, the start of the new audio is moved to `~/recordings/.replaced/` (with its transcript), never deleted. Nothing else counts as proof (two downloads of the same pages can differ inside), so any other copy stays, and the new one is filed beside it with `_r1`, `_r2`, ... added.
+
+A recording is several files (`.opus`, `.json`, `.wav`, ...), and each one is filed, set aside or renamed as one job: written to a journal first, every file copied, flushed and renamed into place, and only then the originals removed. If the power goes in the middle, the next sync finds the journal and finishes the job, so a recording is never left split or half-copied.
 
 If an earlier version left several `_r` copies of one recording, tidy them once: `python3 ~/.local/share/pendant/pendant_file.py --tidy ~/recordings --dry-run` shows what it would do, and without `--dry-run` it keeps the copy that provably holds all the others and moves the rest to `~/recordings/.replaced/`. It won't start while a sync or transcription is running (stop transcription first with `systemctl --user stop pendant-transcribe.service`), and it clears any half-finished `.filing` copy an interrupted run left behind.
 
-What this doesn't cover: the files are written with ordinary writes, so a power cut in the few seconds between saving and freeing could in theory lose that one sync's audio; the WAV is decoded after freeing (the `.opus` is what's kept, and the WAV can always be rebuilt from it); and the backup runs nightly, so until then the Pi holds the only copy. If that gap matters to you, keep `--delete-after` off (edit `~/.local/share/pendant/pendant-sync`) and clear the pendant by hand now and then.
+What this doesn't cover: an SD card that reports a write as flushed when it isn't (rare, but cheap cards have done it); the WAV is decoded after freeing (the `.opus` is what's kept, and the WAV can always be rebuilt from it); and the backup runs nightly, so until then the Pi holds the only copy. If that gap matters to you, keep `--delete-after` off (edit `~/.local/share/pendant/pendant-sync`) and clear the pendant by hand now and then.
 
 ## 7. Your own encryption key
 
@@ -271,6 +273,8 @@ On a Pi 4 it runs about 1.4× faster than real time for steady talking, and far 
 
 **Tidying up.** WAVs are about 15 times bigger than the compact `.opus` audio. After each nightly run, WAVs from more than 14 days ago are deleted, but only when that recording has a transcript and its `.opus` has just been rebuilt in full as a test (at least 98% of the WAV's length), so a damaged compact file never costs the playable copy. To listen to an old one again, rebuild it: `pendant decode ~/recordings/<day>/<file>.opus`. Each run also logs how much space is free and warns when the card is getting full. Keep WAVs longer (or shorter) with `PENDANT_KEEP_WAV_DAYS=30` in `~/.config/pendant/env`, or set it to `never`. `pendant transcribe --tidy` tidies right away.
 
+**Vocabulary.** The speech model is English-only, so words it hasn't learned come out as English look-alikes ("Pali Canon" as "polycan"). Give it a list of words to expect and it spells them right. It starts with a short list of Pali Dhamma terms (dukkha, samadhi, sutta, SuttaCentral, ...). Use your own, such as names, places, or terms from your work, by putting them in `~/.config/pendant/vocabulary.txt`, separated by commas or new lines (`#` starts a comment). An empty file, or `PENDANT_VOCABULARY=off` in `~/.config/pendant/env`, turns it off. It applies to transcripts made from then on; redo a day with `pendant transcribe --redo-day <YYYY-MM-DD>`. Keep the list short (a few dozen words): it's sent with every 30 seconds of audio.
+
 Settings, in `~/.config/pendant/env` or before the command: `PENDANT_WHISPER_MODEL` (`base.en` by default; `tiny.en` is faster, `small.en` more accurate but may not keep up on a Pi 4), `PENDANT_WHISPER_BEAM` (1; higher is slower and slightly more accurate).
 
 ## 9. Nightly backup to Google Drive (optional)
@@ -303,13 +307,19 @@ pendant backup
 systemctl --user enable --now pendant-backup.timer
 ```
 
-**Back up the backup's passwords**, with your audio key. Without them the backup can't be read:
+**Keep your keys off the Pi.** Without the backup's passwords the backup can't be read, and without your audio key recordings still on the pendant can't be either. One command prints all of them as a single block of text:
 
 ```
-cat ~/.config/pendant/keys/backup-crypt.txt
+pendant crypto export
 ```
 
-**Restoring** on a new Pi: set up rclone with a Google sign-in and the same two passwords (`rclone config create pendant-backup crypt remote=gdrive:pendant-backup password=<password> password2=<password2> --obscure`), then `rclone copy pendant-backup: ~/recordings`.
+Copy everything from `-----BEGIN PENDANT KEYS-----` to `-----END PENDANT KEYS-----` into your password manager or vault. Do it again after any `pendant crypto setkey` (for example after a factory reset). See [Restoring onto a new Pi](#restoring-onto-a-new-pi).
+
+**Check the backup** now and then. This copies nothing: it compares every file on the Pi with its encrypted copy on Drive, by checksum, without downloading:
+
+```
+pendant backup --check
+```
 
 **Readable transcripts (optional).** To let an assistant read your transcripts (see [the morning note](#a-morning-note)), add this setting, and the nightly backup also copies the `.txt` transcripts, **unencrypted**, to a `pendant-transcripts` folder on Drive. Text only, never audio. Google can read these too.
 
@@ -351,10 +361,38 @@ curl -fsSL https://raw.githubusercontent.com/timedrapery/pendant-link/main/pi/in
 It prints the address to open (like `http://pendantpi.local:8765`, plus a numbered one in case `.local` names don't work on your phone) and a password. Any user name works with it, and your browser can remember it. The password is also in `~/.config/pendant/env`.
 
 - It only uses Python's built-in parts, so nothing new is installed, and it starts by itself at boot.
-- It's reachable only on your home network, and only with the password, because transcripts hold other people's words too. It's plain HTTP, so treat it as a home-only page; don't forward the port on your router.
+- It's reachable only on your home network, and only with the password, because transcripts hold other people's words too. It's plain HTTP, so it's a home-only page: it answers only home-network addresses (it turns away anything from the internet, even with the right password), and its password is in a settings file only you can read. Don't forward the port on your router; to reach it from outside, use a VPN such as Tailscale.
 - It doesn't log what anyone views.
 
 ---
+
+## Restoring onto a new Pi
+
+What you need from outside the Pi: the `PENDANT KEYS` block from your password manager (see step 9), and your Google account. What it brings back: every recording's compact audio, metadata, stars and transcripts. WAVs come back by rebuilding them from the audio.
+
+1. Steps 2 to 4: flash a card, connect, install pendant-cli.
+2. Put your keys back. Run this, paste the whole block, press Enter, then Ctrl+D:
+
+   ```
+   pendant crypto import
+   pendant crypto status
+   ```
+
+   `status` should show the same audio key id the block shows at the top.
+3. Step 5 (pair the pendant; a factory reset is needed if it was paired with the old Pi) and step 6 (install sync). Don't turn on the sync timer yet.
+4. `pendant crypto setkey`, so the pendant encrypts for this Pi. The pendant's reset gives it a new key; your earlier ones stay in `previous/` for older recordings.
+5. Step 9's install command. It finds the backup's passwords you just restored and reconnects to the same encrypted folder, after the Google sign-in. Then bring everything back and check it:
+
+   ```
+   rclone copy pendant-backup: ~/recordings --stats-one-line --stats 30s
+   pendant backup --check
+   ```
+
+   The check should end with "Backup check passed".
+6. Steps 8 and 11 (transcripts, browse page). Open the page and play a recording: older ones offer a button to rebuild the playable file.
+7. Turn the timers on (steps 6, 8, 9).
+
+**Practise it first.** You can rehearse on a second Pi or a spare SD card while the real Pi keeps running: do steps 1, 2, 5 and 6 above, skipping the pendant (use `export PENDANT_ADDRESS=00:00:00:00:00:00` for the install in step 3, and don't turn on any timers). The old Pi isn't touched, and the pendant stays paired with it. When `pendant backup --check` passes and a recording plays on the practice Pi, you know your vault copy and your backup are enough on their own.
 
 ## Everyday commands
 
@@ -368,6 +406,8 @@ It prints the address to open (like `http://pendantpi.local:8765`, plus a number
 | `pendant transcribe --tidy` | Delete old WAVs now and show free space |
 | `pendant decode <file>.opus` | Rebuild a WAV to listen to |
 | `pendant backup` | Back up now |
+| `pendant backup --check` | Check every file is in the backup, intact (downloads nothing) |
+| `pendant crypto export` | Print your keys and backup passwords as one block for your password manager |
 | `pendant led 0` | Light off (`100` is full) |
 | `pendant crypto status` | Which keys are set up |
 | `systemctl --user restart pendant-web` | Restart the browse page |
@@ -428,7 +468,7 @@ That leaves your recordings (`~/recordings`) and keys (`~/.config/pendant`) alon
 
 ## What the pendant-cli patch changes
 
-`pendant-cli-fixes.patch` fixes how [pendant-cli](https://github.com/sdelcore/pendant-cli) reads the pendant and adds what this guide uses. Message layouts come from the Limitless Android app. It applies cleanly to upstream commit `1c71659`, which the installer checks out so the code you run is the code that was tested, and passes pendant-cli's tests (119, including 33 for the page-freeing logic and 17 for encryption and keys). The installer in step 6 applies it; it resets pendant-cli to its original files first (removing files an earlier version of the patch added), and only updates its own two lines in `~/.config/pendant/env`, so it's safe to rerun. Your own changes to pendant-cli's files, if any, would be lost.
+`pendant-cli-fixes.patch` fixes how [pendant-cli](https://github.com/sdelcore/pendant-cli) reads the pendant and adds what this guide uses. Message layouts come from the Limitless Android app. It applies cleanly to upstream commit `1c71659`, which the installer checks out so the code you run is the code that was tested, and passes pendant-cli's tests (132, including 39 for the page-freeing logic and 23 for encryption and keys). The installer in step 6 applies it; it resets pendant-cli to its original files first (removing files an earlier version of the patch added), and only updates its own two lines in `~/.config/pendant/env`, so it's safe to rerun. Your own changes to pendant-cli's files, if any, would be lost.
 
 **Reading the pendant correctly**
 - **Recording status** shows the real state: not recording, recording, or listening (armed to record when it hears speech), which pendant-cli used to print as `False`.
@@ -439,9 +479,9 @@ That leaves your recordings (`~/recordings`) and keys (`~/.config/pendant`) alon
 
 **Encryption, rebuilt to match the app.** pendant-cli assumed X25519 keys and a NaCl sealed box. The app (read from its JavaScript bundle) uses P-256 ECDH, HKDF-SHA256 with empty salt and info, and AES-128-GCM, and the encrypted-audio message is nonce (field 1), ciphertext (2), tag (3), packet offsets (4); pendant-cli had nonce and ciphertext swapped. `pendant crypto setkey`, `status` and `decrypt` now follow the app. The key derivation was checked against WebCrypto, the API the app uses.
 
-**Downloading safely.** `pendant download` stops once the pendant goes quiet (`--idle-timeout`) and can free pages afterwards (`--delete-after`), under the rules in step 6: files saved, run starts at the pendant's oldest page, unbroken, stops before unreadable or unparseable pages (until one has failed in 3 separate downloads, with its bytes saved), nothing freed if anything couldn't be decrypted.
+**Downloading safely.** `pendant download` stops once the pendant goes quiet (`--idle-timeout`) and can free pages afterwards (`--delete-after`), under the rules in step 6: files saved, flushed to the card, read back and identical to what was downloaded; run starts at the pendant's oldest page, unbroken, stops before unreadable or unparseable pages (until one has failed in 3 separate downloads, with its bytes saved), nothing freed if anything couldn't be decrypted.
 
-**New commands:** `pendant sync`, `pendant backup`, `pendant transcribe` (which run the scripts in this folder), and `pendant led`.
+**New commands:** `pendant sync`, `pendant backup` (and `--check`), `pendant transcribe` (which run the scripts in this folder), `pendant led`, and `pendant crypto export` / `import` (keys and backup passwords to a password manager and back, as one checksummed text block).
 
 **Health file.** Each sync writes `~/recordings/pendant-health.json`: when it last synced, battery, storage, when pages were last freed and, if the last sync couldn't free them, why. Nothing about what was said. With readable transcripts on, it goes to Drive too, so a morning note can mention a pendant that hasn't synced or freed space in a day, or a low battery.
 

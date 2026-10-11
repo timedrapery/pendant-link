@@ -4,6 +4,8 @@
 # Skips .wav files (rebuild them with `pendant decode`), anything still in .incoming, and
 # .replaced (copies set aside because a kept copy provably holds all of them).
 # Run it as `pendant backup`; pendant-backup.timer does that every night.
+# `pendant backup --check` copies nothing: it checks that every file here is in the backup
+# and intact (rclone cryptcheck compares checksums through the encryption; nothing is downloaded).
 set -euo pipefail
 
 ARCHIVE="${PENDANT_ARCHIVE:-$HOME/recordings}"
@@ -22,15 +24,23 @@ mkdir -p "$ARCHIVE"
 exec > >(tee -a "$LOG") 2>&1
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*"; }
 
+SKIP=(--exclude ".incoming/**" --exclude ".replaced/**" --exclude ".filing-journal/**"
+      --exclude "*.wav" --exclude "*.lock" --exclude "*.log" --exclude "*.tmp" --exclude "*.filing")
+
+if [ "${1:-}" = "--check" ]; then
+  log "Checking the backup against $ARCHIVE (nothing is downloaded)"
+  if rclone cryptcheck "$ARCHIVE" "$REMOTE" --one-way "${SKIP[@]}" --checkers 4 -v; then
+    log "Backup check passed: every file here is in the backup, intact."
+    exit 0
+  fi
+  log "Backup check found differences (listed above). Files made since the last backup show as missing until the next one runs."
+  exit 1
+fi
+
 log "Backing up $ARCHIVE"
 rclone copy "$ARCHIVE" "$REMOTE" \
-  --exclude ".incoming/**" \
-  --exclude ".replaced/**" \
-  --exclude "*.wav" \
-  --exclude "*.lock" \
-  --exclude "*.log" \
-  --exclude "*.tmp" \
-  --transfers 2 \
+  "${SKIP[@]}" \
+  --transfers 2 --tpslimit 8 \
   --stats-one-line --stats 60s -v || { log "Backup failed; will try again tomorrow."; exit 1; }
 log "Backup done."
 
@@ -42,6 +52,7 @@ if [ "${PENDANT_TRANSCRIPTS_TO_DRIVE:-}" = "yes" ]; then
     --filter "+ pendant_*.txt" \
     --filter "+ /pendant-health.json" \
     --filter "- *" \
+    --tpslimit 8 \
     --stats-one-line --stats 60s -v || { log "Copying transcripts failed; will try again tomorrow."; exit 1; }
   log "Transcripts done."
 fi

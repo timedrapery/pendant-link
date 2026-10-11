@@ -432,3 +432,48 @@ def test_stars_found_in_a_large_metadata_file(tr, tmp_path):
             "stars_ms": [press]}
     wav.with_suffix(".json").write_text(json.dumps(meta, indent=2))
     assert tr.stars_for(wav) == [datetime(2026, 10, 10, 18, 0, 0)]
+
+
+def test_pali_vocabulary_is_passed_as_hotwords(tr, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    wav = _rec(tmp_path, "20261010_153124")
+
+    class HotwordModel:
+        seen = []
+        def transcribe(self, audio, language=None, beam_size=1, vad_filter=True,
+                       condition_on_previous_text=False, hotwords=None, initial_prompt=None):
+            self.seen.append((hotwords, initial_prompt))
+            return iter([SimpleNamespace(start=1, end=2, text="the Pali Canon and dukkha")]), None
+
+    m = HotwordModel()
+    tr.main([], model_factory=lambda: m)
+    hot, prompt = m.seen[0]
+    assert "Pali Canon" in hot and "dukkha" in hot and "SuttaCentral" in hot and prompt is None
+    assert "Pali Canon" in json.loads(wav.with_suffix(".words.json").read_text())["vocabulary"]
+
+
+def test_older_model_gets_an_initial_prompt(tr, tmp_path):
+    class OldModel:
+        def transcribe(self, audio, language=None, beam_size=1, vad_filter=True,
+                       condition_on_previous_text=False, initial_prompt=None):
+            pass
+    assert "initial_prompt" in tr._vocab_args(OldModel(), "dukkha")
+    class NoPrompt:
+        def transcribe(self, audio, language=None):
+            pass
+    assert tr._vocab_args(NoPrompt(), "dukkha") == {}
+    assert tr._vocab_args(OldModel(), None) == {}
+
+
+def test_own_vocabulary_file_and_turning_it_off(tr, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg = tmp_path / ".config" / "pendant"
+    cfg.mkdir(parents=True)
+    (cfg / "vocabulary.txt").write_text("# my words\nAjahn Chah, Wat Pah Pong\nAnalayo  # a teacher\n")
+    assert tr.vocabulary() == "Ajahn Chah, Wat Pah Pong, Analayo"
+    (cfg / "vocabulary.txt").write_text("")
+    assert tr.vocabulary() is None
+    (cfg / "vocabulary.txt").unlink()
+    assert "dukkha" in tr.vocabulary()
+    monkeypatch.setenv("PENDANT_VOCABULARY", "off")
+    assert tr.vocabulary() is None

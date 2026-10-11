@@ -14,6 +14,9 @@ say() { echo "==> $*"; }
 
 mkdir -p "$SHARE" "$HOME/.config/systemd/user" "$(dirname "$ENV")"
 touch "$ENV"
+# The settings file holds the page's password: readable by you only.
+chmod 700 "$(dirname "$ENV")"
+chmod 600 "$ENV"
 
 if ! grep -q '^PENDANT_WEB_PASSWORD=.' "$ENV"; then
   say "Making a password for the page"
@@ -37,6 +40,8 @@ if systemctl --user is-active --quiet pendant-web.service; then
   [ -n "$IP" ] && echo "   or http://$IP:$PORT"
   echo "    User name: anything.  Password: $PW"
   echo "    (Your browser can remember it. The password is also in $ENV.)"
+  echo "    It's plain HTTP, meant for your own Wi-Fi: it only answers home-network addresses."
+  echo "    Don't open a router port to it; to reach it from outside, use a VPN such as Tailscale."
 else
   echo "The page didn't start. See: systemctl --user status pendant-web.service --no-pager"
   exit 1

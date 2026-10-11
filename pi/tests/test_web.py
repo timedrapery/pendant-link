@@ -131,3 +131,29 @@ def test_range_parsing(web):
     assert mod.parse_range("bytes=5-100", 10) == (5, 9)
     assert mod.parse_range("bytes=9-3", 10) is None
     assert mod.parse_range("nonsense", 10) is None
+
+
+def test_only_home_network_addresses(web):
+    mod, _, _ = web
+    for ok in ("127.0.0.1", "192.168.1.20", "10.0.0.5", "172.16.3.4", "::1", "fe80::1%wlan0",
+               "::ffff:192.168.1.20", "169.254.10.10"):
+        assert mod.from_home_network(ok), ok
+    for bad in ("8.8.8.8", "52.1.2.3", "2606:4700::1111", "::ffff:8.8.8.8", "nonsense"):
+        assert not mod.from_home_network(bad), bad
+
+
+def test_turns_away_outside_addresses_even_with_password(web, monkeypatch):
+    mod, url, _ = web
+    monkeypatch.setattr(mod, "from_home_network", lambda addr: False)
+    status, _, _ = get(url + "/")
+    assert status == 403
+
+
+def test_settings_file_made_private(web, tmp_path):
+    mod, _, _ = web
+    env = tmp_path / "env"
+    env.write_text("PENDANT_WEB_PASSWORD=x\n")
+    env.chmod(0o644)
+    assert mod.tighten_settings(env) is True
+    assert env.stat().st_mode & 0o777 == 0o600
+    assert mod.tighten_settings(env) is False

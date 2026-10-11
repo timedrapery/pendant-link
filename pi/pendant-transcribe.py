@@ -22,9 +22,15 @@ from days more than PENDANT_KEEP_WAV_DAYS ago (default 14) are deleted, but only
 .opus and the transcript are both there. Rebuild one any time with `pendant decode FILE.opus`.
 Set PENDANT_KEEP_WAV_DAYS=never to keep them all.
 
+Vocabulary: words the speech model should expect, so names and terms it doesn't know come
+out spelled right. The default is a short list of Pali Dhamma terms. Put your own in
+~/.config/pendant/vocabulary.txt (separated by commas or new lines; # starts a comment);
+an empty file, or PENDANT_VOCABULARY=off, turns it off. It applies to new transcripts; redo
+older ones with --redo-day.
+
 Settings (environment, or ~/.config/pendant/env): PENDANT_WHISPER_MODEL (default base.en),
 PENDANT_WHISPER_THREADS (4), PENDANT_WHISPER_BEAM (1), PENDANT_KEEP_WAV_DAYS (14),
-PENDANT_ARCHIVE (~/recordings).
+PENDANT_ARCHIVE (~/recordings), PENDANT_VOCABULARY (on).
 """
 
 import argparse
@@ -45,6 +51,49 @@ BEAM = int(os.environ.get("PENDANT_WHISPER_BEAM", "1"))
 NO_SPEECH = "(no speech found)"
 STAR = "★"
 STAR_BEFORE, STAR_AFTER = 90, 15  # seconds around a button press
+
+
+# Plain spellings: the English model writes these more reliably than with diacritics.
+DEFAULT_VOCABULARY = [
+    "Dhamma", "Pali Canon", "sutta", "suttas", "SuttaCentral", "Buddha", "Sangha", "desana",
+    "dukkha", "sukha", "samadhi", "sati", "anapanasati", "satipatthana", "bojjhanga", "jhana",
+    "kamma", "vipaka", "asava", "mano", "citta", "nibbana", "anicca", "anatta", "metta",
+    "sila", "panna", "vedana", "sanna", "sankhara", "vinnana", "tanha", "upadana",
+    "Kondanna", "Mahaparinibbana", "moghapurisa", "Bhikkhu", "Tathagata",
+]
+
+
+def vocabulary():
+    """Words to expect, as one comma-separated string, or None when turned off."""
+    if setting("PENDANT_VOCABULARY", "on").lower() in ("off", "no", "0", "false"):
+        return None
+    path = Path.home() / ".config" / "pendant" / "vocabulary.txt"
+    words = DEFAULT_VOCABULARY
+    try:
+        text = path.read_text()
+    except OSError:
+        text = None
+    if text is not None:
+        words = [w.strip() for line in text.splitlines()
+                 for w in line.split("#", 1)[0].split(",") if w.strip()]
+    return ", ".join(words) or None
+
+
+def _vocab_args(model, words):
+    """Pass the words as hotwords (every 30-second window) where the model supports it;
+    otherwise as an initial prompt (which only steers the start)."""
+    if not words:
+        return {}
+    import inspect
+    try:
+        params = inspect.signature(model.transcribe).parameters
+    except (TypeError, ValueError):
+        params = {}
+    if "hotwords" in params:
+        return {"hotwords": words}
+    if "initial_prompt" in params or any(p.kind == p.VAR_KEYWORD for p in params.values()):
+        return {"initial_prompt": words}
+    return {}
 
 
 def setting(name, default):
@@ -264,11 +313,13 @@ def transcribe_one(model, wav: Path):
     duration = wav_seconds(wav)
     clock = clock_for(wav, duration, meta)
     del meta
+    vocab = vocabulary()
+    extra = _vocab_args(model, vocab)
     lines, words = [], []
     for offset, audio in wav_windows(wav, WINDOW_SECONDS, CUT_SEARCH_SECONDS):
         segments, _ = model.transcribe(
             audio, language="en", beam_size=BEAM, vad_filter=True,
-            condition_on_previous_text=False,
+            condition_on_previous_text=False, **extra,
         )
         for seg in segments:
             text = seg.text.strip()
@@ -290,6 +341,7 @@ def transcribe_one(model, wav: Path):
         "recording": wav.name, "model": MODEL,
         "recording_start": start.isoformat(timespec="seconds") if start else None,
         "duration": round(duration, 1),
+        "vocabulary": vocab if extra else None,
         "stars": [t.isoformat(timespec="seconds") for t in stars], "segments": words,
     }, indent=1))
     _write_atomic(wav.with_suffix(".txt"), ("\n".join(lines) if lines else NO_SPEECH) + "\n")

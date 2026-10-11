@@ -6,13 +6,17 @@ pendant, the next sync downloads them again under the same name. The new downloa
 compared with every copy already filed under that name (the plain name and any _r1, _r2, ...):
 
 - identical to a filed copy: the new download is a duplicate and is dropped;
-- it provably holds everything a filed copy does: that copy is moved aside to
-  ~/recordings/.replaced/ (transcript included), never deleted. Proof is either
-    * the audio of the filed copy is, byte for byte, the start of the new audio, or
-    * both copies list their pages, the new one covers the filed one's range, holds at least
-      as many pages, and has at least as much audio;
-- copies it can't be proven to contain stay where they are, and the new one is filed beside
-  them (under the plain name if it's free, otherwise the next _rN).
+- the filed copy's audio is, byte for byte, the start of the new audio (the only proof
+  accepted that the new one holds everything the old one does): the filed copy is moved
+  aside to ~/recordings/.replaced/ (transcript included), never deleted;
+- anything else stays where it is, and the new one is filed beside it (under the plain name
+  if it's free, otherwise the next _rN).
+
+Every move of a recording's files (it has several: .opus, .json, .wav, ...) is one job:
+it's written to a journal first, each file is copied, flushed and renamed into place, and
+only once all of them are in place are the originals removed. If the job is interrupted,
+the next run finds the journal and finishes it, so a recording is never left split or
+half-copied, and there are always at least one complete set of its files.
 
 Usage:
   pendant_file.py INCOMING_DIR ARCHIVE_DIR        file new downloads
@@ -24,9 +28,11 @@ Usage:
 import fcntl
 import hashlib
 import json
+import os
 import re
 import shutil
 import sys
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -94,20 +100,19 @@ def _files(directory: Path, base: str):
 
 def compare(old_dir: Path, old: str, new_dir: Path, new: str):
     """How the recording `new` relates to the filed copy `old`:
-    'same', 'contains' (new holds all of old), or 'unproven'."""
+    'same' (identical audio), 'contains' (old's audio is exactly the start of new's), or 'unproven'.
+
+    Page ranges and sizes are never enough on their own: two downloads of the same pages
+    can differ inside (a page read on one try and not the next), so only the bytes decide.
+    """
     old_opus, new_opus = old_dir / f"{old}.opus", new_dir / f"{new}.opus"
     if not old_opus.exists() or not new_opus.exists():
         return "unproven"
-    old_p, new_p = _pages(old_dir / f"{old}.json"), _pages(new_dir / f"{new}.json")
     size_old, size_new = old_opus.stat().st_size, new_opus.stat().st_size
-    if old_p == new_p and size_old == size_new and _digest(old_opus) == _digest(new_opus):
+    if size_old == size_new and size_old > 0 and _digest(old_opus) == _digest(new_opus):
         return "same"
     if size_new > size_old and _is_prefix(old_opus, new_opus):
-        return "contains"  # the old audio is exactly the start of the new
-    if old_p and new_p:
-        (of, ol, oc), (nf, nl, nc) = old_p, new_p
-        if nf <= of and nl >= ol and nc >= oc and size_new >= size_old:
-            return "contains"
+        return "contains"
     return "unproven"
 
 
@@ -121,16 +126,98 @@ def copies(day: Path, base: str):
     return [name for _, name in sorted(found)]
 
 
-def _move_aside(archive: Path, day: Path, name: str, dry_run=False):
+JOURNAL_DIR = ".filing-journal"
+
+
+def _fsync_path(path: Path):
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _write_journal(archive: Path, pairs):
+    d = archive / JOURNAL_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    j = d / f"{uuid.uuid4().hex}.json"
+    tmp = j.with_name(j.name + ".tmp")
+    with tmp.open("w") as f:
+        json.dump({"moves": [[str(a), str(b)] for a, b in pairs]}, f)
+        f.flush()
+        os.fsync(f.fileno())
+    tmp.replace(j)
+    _fsync_path(d)
+    return j
+
+
+def _run_moves(pairs):
+    """Copy each source to its destination (flushed, then renamed into place); then, only when
+    every destination is complete, remove the sources. Safe to run again after an interruption."""
+    folders = set()
+    for src, dest in pairs:
+        if src.exists():
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            tmp = dest.with_name(dest.name + ".filing")
+            shutil.copy2(str(src), str(tmp))
+            with tmp.open("rb") as f:
+                os.fsync(f.fileno())
+            tmp.replace(dest)
+            folders.add(dest.parent)
+        elif not dest.exists():
+            raise RuntimeError(f"neither {src} nor {dest} exists")
+    for d in folders:
+        _fsync_path(d)
+    for src, _ in pairs:
+        if src.exists():
+            src.unlink()
+    for d in {s.parent for s, _ in pairs}:
+        if d.exists():
+            _fsync_path(d)
+
+
+def move_recording(archive: Path, pairs):
+    """Move a recording's files as one job, journaled so an interruption is finished next run."""
+    if not pairs:
+        return
+    j = _write_journal(archive, pairs)
+    _run_moves(pairs)
+    j.unlink()
+
+
+def finish_interrupted(archive: Path):
+    """Complete any move an earlier run started but didn't finish, and clear unfinished copies."""
+    d = archive / JOURNAL_DIR
+    if d.is_dir():
+        for j in sorted(d.glob("*.json")):
+            try:
+                pairs = [(Path(a), Path(b)) for a, b in json.loads(j.read_text())["moves"]]
+            except (OSError, ValueError, KeyError) as e:
+                _log(f"couldn't read {j.name} ({e}); leaving it for a person to look at")
+                continue
+            _run_moves(pairs)
+            j.unlink()
+            _log(f"finished a filing an earlier run didn't complete ({len(pairs)} file(s))")
+        for t in d.glob("*.tmp"):
+            t.unlink()
+    for day in archive.glob("[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]"):
+        remove_leftovers(day)
+
+
+def _aside_dir(archive: Path, name: str):
     stem = archive / ".replaced" / f"{name}-{datetime.now():%Y%m%d_%H%M%S}"
     aside, n = stem, 1
     while aside.exists():  # never move into a folder that already holds a copy
         n += 1
         aside = stem.with_name(f"{stem.name}-{n}")
+    return aside
+
+
+def _move_aside(archive: Path, day: Path, name: str, dry_run=False):
+    aside = _aside_dir(archive, name)
     if not dry_run:
         aside.mkdir(parents=True)
-        for f in _files(day, name):
-            shutil.move(str(f), str(aside / f.name))
+        move_recording(archive, [(f, aside / f.name) for f in _files(day, name)])
     return aside
 
 
@@ -143,17 +230,13 @@ def _free_name(day: Path, base: str):
     return f"{base}_r{n}"
 
 
-def _place(src_dir: Path, src: str, day: Path, target: str):
-    """Copy, rename into place, then remove the source: an interruption never leaves zero copies."""
-    for f in _files(src_dir, src):
-        dest = day / f"{target}{f.name[len(src):]}"
-        tmp = dest.with_name(dest.name + ".filing")
-        shutil.copy2(str(f), str(tmp))
-        tmp.replace(dest)
-        f.unlink()
+def _place(archive: Path, src_dir: Path, src: str, day: Path, target: str):
+    """File every file of a recording under a new folder or name, as one journaled job."""
+    move_recording(archive, [(f, day / f"{target}{f.name[len(src):]}") for f in _files(src_dir, src)])
 
 
 def file_incoming(incoming: Path, archive: Path):
+    finish_interrupted(archive)
     bases = sorted({m.group(1) for p in incoming.iterdir() if (m := NAME_RE.match(p.name))})
     for base in bases:
         m = re.match(r"pendant_(\d{4})(\d{2})(\d{2})_", base)
@@ -174,7 +257,7 @@ def file_incoming(incoming: Path, archive: Path):
         target = _free_name(day, base)
         if target != base:
             _log(f"{base}: a copy it can't be proven to contain is already filed; this one is {target}")
-        _place(incoming, base, day, target)
+        _place(archive, incoming, base, day, target)
 
 
 def _hold_locks(archive: Path):
@@ -194,7 +277,8 @@ def _hold_locks(archive: Path):
 
 
 def remove_leftovers(day: Path):
-    """A .filing file is a copy that never finished; its source is still in place, so it can go."""
+    """A .filing file is a copy that never finished; its source is still in place (sources are
+    removed only after every copy is complete), so it can go."""
     for f in day.glob("*.filing"):
         f.unlink()
         _log(f"removed {day.name}/{f.name}, an unfinished copy from an interrupted run")
@@ -211,6 +295,8 @@ def tidy(archive: Path, dry_run=False):
              "(stop transcription with: systemctl --user stop pendant-transcribe.service).")
         return False
     try:
+        if not dry_run:
+            finish_interrupted(archive)
         _tidy(archive, dry_run)
     finally:
         for f in locks:
@@ -220,8 +306,6 @@ def tidy(archive: Path, dry_run=False):
 
 def _tidy(archive: Path, dry_run):
     for day in sorted(archive.glob("[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]")):
-        if not dry_run:
-            remove_leftovers(day)
         bases = sorted({m.group(1) for p in day.glob("pendant_*_r*.opus") if (m := COPY_RE.match(p.name[:-5]))})
         for base in bases:
             names = copies(day, base)
@@ -243,7 +327,7 @@ def _tidy(archive: Path, dry_run):
                 if dry_run:
                     _log(f"  would rename {best} to {base}")
                 else:
-                    _place(day, best, day, base)
+                    _place(archive, day, best, day, base)
                     _log(f"  renamed {best} to {base}")
 
 

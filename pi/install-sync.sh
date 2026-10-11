@@ -76,6 +76,10 @@ curl -fsSL "$BASE/pendant-sync.timer" \
 # Update only our own lines in the settings file; keep everything else (web password, options).
 ENV="$HOME/.config/pendant/env"
 touch "$ENV"
+# Your settings, keys and recordings are yours alone on this Pi.
+chmod 700 "$HOME/.config/pendant" "$HOME/recordings"
+chmod 600 "$ENV"
+[ -d "$HOME/.config/pendant/keys" ] && chmod 700 "$HOME/.config/pendant/keys"
 set_setting() {
   if grep -q "^$1=" "$ENV"; then
     sed -i "s|^$1=.*|$1=$2|" "$ENV"

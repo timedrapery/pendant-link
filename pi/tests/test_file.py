@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -51,9 +52,9 @@ def test_identical_retry_is_dropped(dirs):
 def test_superset_replaces_and_keeps_old_aside(dirs):
     inc, arc, day = dirs
     rec(day, 5162, 5326, audio=b"A" * 100, transcript="old\n")
-    rec(inc, 5162, 7133, audio=b"B" * 900)
+    rec(inc, 5162, 7133, audio=b"A" * 100 + b"B" * 800)
     pf.file_incoming(inc, arc)
-    assert (day / f"{BASE}.opus").read_bytes() == b"B" * 900
+    assert (day / f"{BASE}.opus").read_bytes() == b"A" * 100 + b"B" * 800
     assert not (day / f"{BASE}.txt").exists()          # will be transcribed again
     aside = list((arc / ".replaced").iterdir())
     assert len(aside) == 1
@@ -103,10 +104,10 @@ def test_new_copy_is_compared_with_every_filed_copy(dirs):
     inc, arc, day = dirs
     rec(day, 1, 10, audio=b"A" * 500)
     rec(day, 1, 3, audio=b"C" * 50, base=BASE + "_r1")
-    rec(inc, 1, 4, audio=b"D" * 60)          # holds all of _r1, not of the plain copy
+    rec(inc, 1, 4, audio=b"C" * 50 + b"D" * 10)   # holds all of _r1, not of the plain copy
     pf.file_incoming(inc, arc)
     assert (day / f"{BASE}.opus").read_bytes() == b"A" * 500
-    assert (day / f"{BASE}_r1.opus").read_bytes() == b"D" * 60
+    assert (day / f"{BASE}_r1.opus").read_bytes() == b"C" * 50 + b"D" * 10
     assert not (day / f"{BASE}_r2.opus").exists()
     assert len(list((arc / ".replaced").iterdir())) == 1
 
@@ -188,3 +189,69 @@ def test_tidy_clears_an_unfinished_copy(dirs):
     pf.tidy(arc)
     assert not list(day.glob("*.filing"))
     assert (day / f"{BASE}.wav").exists()
+
+
+def test_more_pages_and_more_audio_is_not_proof(dirs):
+    """Review, Oct 11: a download covering the same pages with more audio can still differ
+    inside. Without byte-for-byte proof both copies are kept."""
+    inc, arc, day = dirs
+    rec(day, 5162, 5326, audio=b"A" * 100, transcript="old\n")
+    rec(inc, 5162, 7133, audio=b"B" * 900)
+    pf.file_incoming(inc, arc)
+    assert (day / f"{BASE}.opus").read_bytes() == b"A" * 100
+    assert (day / f"{BASE}.txt").read_text() == "old\n"
+    assert (day / f"{BASE}_r1.opus").read_bytes() == b"B" * 900
+    assert not (arc / ".replaced").exists()
+
+
+def test_interrupted_filing_is_finished_next_run(dirs, monkeypatch):
+    """Power lost after some files were copied: the next run completes the job, and at
+    every point at least one complete set of the recording's files exists."""
+    inc, arc, day = dirs
+    rec(inc, 1, 10, audio=b"A" * 100, transcript="t\n")
+    real_unlink = Path.unlink
+    calls = {"n": 0}
+
+    def crash_on_first_unlink(self, *a, **kw):
+        if self.parent == inc:
+            calls["n"] += 1
+            raise KeyboardInterrupt("power cut")
+        return real_unlink(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "unlink", crash_on_first_unlink)
+    with pytest.raises(KeyboardInterrupt):
+        pf.file_incoming(inc, arc)
+    monkeypatch.setattr(Path, "unlink", real_unlink)
+    # copies are complete, originals still there, journal waiting
+    assert (day / f"{BASE}.opus").read_bytes() == b"A" * 100
+    assert (inc / f"{BASE}.opus").exists()
+    assert list((arc / pf.JOURNAL_DIR).glob("*.json"))
+    pf.file_incoming(inc, arc)                      # next sync
+    assert not list(inc.iterdir())
+    assert not list((arc / pf.JOURNAL_DIR).glob("*.json"))
+    for ext in ("opus", "json", "wav", "txt"):
+        assert (day / f"{BASE}.{ext}").exists()
+    assert pf.copies(day, BASE) == [BASE]
+
+
+def test_interrupted_mid_copy_leaves_originals_and_is_redone(dirs, monkeypatch):
+    inc, arc, day = dirs
+    rec(inc, 1, 10, audio=b"A" * 100)
+    real_copy = shutil.copy2
+    n = {"c": 0}
+
+    def crash_on_second_copy(src, dst, *a, **kw):
+        n["c"] += 1
+        if n["c"] == 2:
+            Path(dst).write_bytes(b"half")          # a partial .filing file
+            raise KeyboardInterrupt("power cut")
+        return real_copy(src, dst, *a, **kw)
+
+    monkeypatch.setattr(shutil, "copy2", crash_on_second_copy)
+    with pytest.raises(KeyboardInterrupt):
+        pf.file_incoming(inc, arc)
+    monkeypatch.setattr(shutil, "copy2", real_copy)
+    assert len(list(inc.iterdir())) == 3            # nothing removed from incoming
+    pf.file_incoming(inc, arc)
+    assert not list(inc.iterdir()) and not list(day.glob("*.filing"))
+    assert (day / f"{BASE}.wav").read_bytes() == b"RIFF" + b"A" * 100

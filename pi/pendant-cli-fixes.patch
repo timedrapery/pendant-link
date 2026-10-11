@@ -286,7 +286,7 @@ index fb98890..4c861ff 100644
  # Register command groups
  cli.add_command(bluetooth.bt)
 diff --git a/src/pendant/commands/audio.py b/src/pendant/commands/audio.py
-index cf0b2e6..79f180c 100644
+index cf0b2e6..b19cd76 100644
 --- a/src/pendant/commands/audio.py
 +++ b/src/pendant/commands/audio.py
 @@ -1,6 +1,8 @@
@@ -339,7 +339,7 @@ index cf0b2e6..79f180c 100644
  
      def start_download():
          click.echo("\nDownloading audio (this may take a while)...")
-@@ -42,8 +52,102 @@ def download(ctx, decode, output):
+@@ -42,8 +52,144 @@ def download(ctx, decode, output):
          return False
  
      GLib.timeout_add_seconds(2, start_download)
@@ -435,6 +435,48 @@ index cf0b2e6..79f180c 100644
 +    return ", ".join(f"{r[0]}-{r[-1]}" if len(r) > 1 else str(r[0]) for r in out)
 +
 +
++def _sha256(data: bytes) -> str:
++    import hashlib
++    return hashlib.sha256(data).hexdigest()
++
++
++def _save(path, data: bytes, expected: dict):
++    """Write a file and remember what it should contain, for verify_saved()."""
++    path.write_bytes(data)
++    expected[path] = (len(data), _sha256(data))
++
++
++def verify_saved(expected: dict):
++    """Make sure every saved file is on disk and holds exactly what was downloaded.
++
++    Each file is flushed to the card (fsync), then read back and compared, size and
++    SHA-256, with the bytes held in memory; the folders are flushed too, so the files'
++    names survive a power cut. Returns a list of problems (empty if all is well).
++    """
++    problems, folders = [], set()
++    for path, (size, digest) in expected.items():
++        try:
++            with open(path, "rb") as f:
++                os.fsync(f.fileno())
++                data = f.read()
++        except OSError as e:
++            problems.append(f"{path.name}: {e}")
++            continue
++        if len(data) != size or _sha256(data) != digest:
++            problems.append(f"{path.name}: on disk it isn't what was downloaded")
++        folders.add(path.parent)
++    for d in folders:
++        try:
++            fd = os.open(d, os.O_RDONLY)
++            try:
++                os.fsync(fd)
++            finally:
++                os.close(fd)
++        except OSError as e:
++            problems.append(f"{d}: {e}")
++    return problems
++
++
 +def _save_and_free(client, decode, output_dir, delete_after):
 +    """Write the downloaded audio to disk, then (optionally) free those pages on the pendant.
 +
@@ -444,21 +486,24 @@ index cf0b2e6..79f180c 100644
  
      # Save audio
      click.echo(f"\n\nDownload complete!")
-@@ -72,26 +176,47 @@ def download(ctx, decode, output):
+@@ -72,26 +218,48 @@ def download(ctx, decode, output):
          timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
  
      opus_fname = None
 +    written = []  # audio files saved in this run
++    expected = {}  # every file saved, with the size and hash it must have on disk
  
      if client.opus_data:
          opus_fname = output_dir / f"pendant_{timestamp}.opus"
-         opus_fname.write_bytes(client.opus_data)
+-        opus_fname.write_bytes(client.opus_data)
++        _save(opus_fname, bytes(client.opus_data), expected)
 +        written.append(opus_fname)
          click.echo(f"\nSaved: {opus_fname}")
  
      if client.pcm_data:
          fname = output_dir / f"pendant_{timestamp}.raw"
-         fname.write_bytes(client.pcm_data)
+-        fname.write_bytes(client.pcm_data)
++        _save(fname, bytes(client.pcm_data), expected)
 +        written.append(fname)
          click.echo(f"Saved: {fname}")
          click.echo(f"  Convert: ffmpeg -f s16le -ar 16000 -ac 1 -i {fname} output.wav")
@@ -472,7 +517,7 @@ index cf0b2e6..79f180c 100644
 +    if undecrypted:
 +        # Every chunk whole (nonce, ciphertext, tag), one per line, so it can be decrypted later.
 +        fname = output_dir / f"pendant_{timestamp}.enc.jsonl"
-+        fname.write_text("".join(json.dumps(r) + "\n" for r in undecrypted))
++        _save(fname, "".join(json.dumps(r) + "\n" for r in undecrypted).encode(), expected)
 +        written.append(fname)
 +        click.echo(f"Saved encrypted audio that couldn't be decrypted: {fname} ({len(undecrypted)} chunks)")
 +        if client.private_key:
@@ -485,7 +530,7 @@ index cf0b2e6..79f180c 100644
 +    if bad_pages:
 +        # What the pendant sent for each page it couldn't read, kept whole, before any freeing.
 +        fname = output_dir / f"pendant_{timestamp}.badpages.jsonl"
-+        fname.write_text("".join(json.dumps(bad_pages[i]) + "\n" for i in sorted(bad_pages)))
++        _save(fname, "".join(json.dumps(bad_pages[i]) + "\n" for i in sorted(bad_pages)).encode(), expected)
 +        bad_file_ok = fname.exists() and fname.stat().st_size > 0
 +        if client.opus_data or client.pcm_data:
 +            written.append(fname)
@@ -498,7 +543,7 @@ index cf0b2e6..79f180c 100644
          # Check if timestamps are real (synced) or just device uptime
          first_ts = client.page_timestamps[0].get("absolute_timestamp_ms", 0) if client.page_timestamps else 0
          timestamps_synced = first_ts > MIN_VALID_TIMESTAMP_MS
-@@ -102,25 +227,205 @@ def download(ctx, decode, output):
+@@ -102,25 +270,209 @@ def download(ctx, decode, output):
              "download_time_iso": datetime.now().isoformat(),
              "timestamps_synced": timestamps_synced,
              "total_pages": client.page_count,
@@ -517,7 +562,8 @@ index cf0b2e6..79f180c 100644
 +                         if b["event"] == "short press" and b["at_ms"]],
          }
          json_fname = output_dir / f"pendant_{timestamp}.json"
-         json_fname.write_text(json.dumps(metadata, indent=2))
+-        json_fname.write_text(json.dumps(metadata, indent=2))
++        _save(json_fname, json.dumps(metadata, indent=2).encode(), expected)
          click.echo(f"Saved metadata: {json_fname}")
  
 +    # Free the pages we just saved -- only through the end of the unbroken run we received.
@@ -575,9 +621,13 @@ index cf0b2e6..79f180c 100644
 +                why = "unreadable" if (through + 1) in bad else "missing"
 +                click.echo(f"Warning: page {through + 1} is {why}; keeping it and everything after it on the pendant.")
 +            had_audio = bool(client.opus_data or client.pcm_data or client.encrypted_data)
-+            saved_ok = all(f.exists() and f.stat().st_size > 0 for f in written) and bool(written)
-+            if had_audio and not saved_ok:
++            if had_audio and not written:
 +                raise click.ClickException("The audio wasn't saved, so nothing will be deleted from the pendant.")
++            problems = verify_saved(expected)
++            if problems:
++                raise click.ClickException("The saved files don't match what was downloaded, so nothing will be "
++                                           "deleted from the pendant: " + "; ".join(problems))
++            click.echo(f"  Checked {len(expected)} saved file(s) on disk: flushed, read back, and identical to the download.")
 +            click.echo(f"Asking the pendant to free pages through index {through}...")
 +            ack = {"reply": None, "id": None}
 +            prior = getattr(client, "on_response", None)
@@ -707,10 +757,10 @@ index cf0b2e6..79f180c 100644
  
  @click.command()
 diff --git a/src/pendant/commands/crypto.py b/src/pendant/commands/crypto.py
-index cc35325..537bd44 100644
+index cc35325..2e19d7e 100644
 --- a/src/pendant/commands/crypto.py
 +++ b/src/pendant/commands/crypto.py
-@@ -1,60 +1,171 @@
+@@ -1,60 +1,296 @@
 -"""Crypto commands: keygen, setkey."""
 +"""Crypto commands: keygen, setkey, status, decrypt.
 +
@@ -874,14 +924,8 @@ index cc35325..537bd44 100644
 +        click.echo(f"  Audio key id: {audiocrypto.key_id(keys[0])}")
 +        if len(keys) > 1:
 +            click.echo(f"  Earlier key generations kept: {len(keys) - 1} (in {d / 'previous'})")
- 
--    GLib.timeout_add_seconds(2, lambda: client.stop() or False)
--    client.run_with_timeout(5)
--    client.disconnect()
- 
--    click.echo("\nPublic key sent to device.")
--    click.echo("New recordings will be encrypted with this key.")
--    click.echo("Use 'pendant download' to download and decrypt audio.")
++
++
 +@crypto.command()
 +@click.argument('enc_file', type=click.Path(exists=True))
 +@click.option('--key', 'key_file', type=click.Path(exists=True), help='Audio key file (default: your current audio.key).')
@@ -914,6 +958,137 @@ index cc35325..537bd44 100644
 +    target.write_bytes(out)
 +    click.echo(f"Decrypted {len(lines) - bad} of {len(lines)} chunks into {target}")
 +    click.echo(f"  Decode: pendant decode {target}")
++
++
++BEGIN, END = "-----BEGIN PENDANT KEYS-----", "-----END PENDANT KEYS-----"
++
++
++def _keys_archive(d: Path) -> bytes:
++    """Every regular file in the keys folder (and earlier generations), as a .tar.gz."""
++    import io
++    import tarfile
++    buf = io.BytesIO()
++    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
++        for f in sorted(d.rglob("*")):
++            if f.is_file() and not f.is_symlink():
++                info = tarfile.TarInfo(str(f.relative_to(d)))
++                data = f.read_bytes()
++                info.size, info.mode, info.mtime = len(data), 0o600, int(f.stat().st_mtime)
++                tar.addfile(info, io.BytesIO(data))
++    return buf.getvalue()
++
++
++def export_text(d: Path) -> str:
++    import base64
++    import hashlib
++    import textwrap
++    blob = _keys_archive(d)
++    names = sorted(str(f.relative_to(d)) for f in d.rglob("*") if f.is_file())
++    keys = audiocrypto.load_all_audio_keys(d)
++    lines = [BEGIN,
++             f"made: {time.strftime('%Y-%m-%d %H:%M')} on this Pi",
++             f"audio key id: {audiocrypto.key_id(keys[0]) if keys else 'none'}"
++             + (f" (and {len(keys) - 1} earlier)" if len(keys) > 1 else ""),
++             f"files: {', '.join(names)}",
++             f"sha256: {hashlib.sha256(blob).hexdigest()}",
++             ""]
++    lines += textwrap.wrap(base64.b64encode(blob).decode(), 76)
++    lines.append(END)
++    return "\n".join(lines) + "\n"
++
++
++def parse_export(text: str) -> bytes:
++    """The .tar.gz inside an export, checked against its sha256. Raises ValueError."""
++    import base64
++    import binascii
++    import hashlib
++    if BEGIN not in text or END not in text:
++        raise ValueError("no PENDANT KEYS block found (it starts with %s)" % BEGIN)
++    body = text.split(BEGIN, 1)[1].split(END, 1)[0]
++    want, data = None, []
++    for line in body.splitlines():
++        line = line.strip()
++        if line.startswith("sha256:"):
++            want = line.split(":", 1)[1].strip()
++        elif line and ":" not in line:
++            data.append(line)
++    try:
++        blob = base64.b64decode("".join(data), validate=True)
++    except (binascii.Error, ValueError):
++        raise ValueError("the block is damaged (not valid base64); copy it again in full")
++    if not want or hashlib.sha256(blob).hexdigest() != want:
++        raise ValueError("the block doesn't match its checksum; it was changed or cut short. Copy it again in full")
++    return blob
++
++
++def import_archive(blob: bytes, d: Path, force=False):
++    """Put exported keys back. Never overwrites a different existing key unless forced, and
++    then keeps the replaced one in previous/. Returns the list of files written."""
++    import io
++    import tarfile
++    with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tar:
++        members = tar.getmembers()
++        for m in members:
++            p = Path(m.name)
++            if not m.isfile() or p.is_absolute() or ".." in p.parts:
++                raise ValueError(f"unexpected entry {m.name!r}; nothing was changed")
++        clashes = [m.name for m in members
++                   if (d / m.name).exists() and (d / m.name).read_bytes() != tar.extractfile(m).read()]
++        if clashes and not force:
++            raise FileExistsError(", ".join(clashes))
++        if clashes:
++            audiocrypto.preserve_current_keys(d)
++        d.mkdir(parents=True, exist_ok=True)
++        d.chmod(0o700)
++        written = []
++        for m in members:
++            dest = d / m.name
++            dest.parent.mkdir(parents=True, exist_ok=True)
++            dest.parent.chmod(0o700)
++            data = tar.extractfile(m).read()
++            dest.touch(mode=0o600, exist_ok=True)
++            dest.chmod(0o600)
++            dest.write_bytes(data)
++            written.append(m.name)
++    return written
++
++
++@crypto.command(name="export")
++def export_cmd():
++    """Print all your keys and backup passwords as one text block, for a password manager."""
++    d = KEYS_DIR
++    if not d.is_dir() or not any(f.is_file() for f in d.rglob("*")):
++        raise click.ClickException(f"No keys in {d} to export.")
++    click.echo(export_text(d), nl=False)
++    click.echo("Copy everything from BEGIN to END (both lines included) into your password manager or vault.\n"
++               "Anyone with this block can read your recordings and backups: keep it only there.", err=True)
+ 
+-    GLib.timeout_add_seconds(2, lambda: client.stop() or False)
+-    client.run_with_timeout(5)
+-    client.disconnect()
+ 
+-    click.echo("\nPublic key sent to device.")
+-    click.echo("New recordings will be encrypted with this key.")
+-    click.echo("Use 'pendant download' to download and decrypt audio.")
++@crypto.command(name="import")
++@click.argument("source", type=click.File("r"), default="-")
++@click.option("--force", is_flag=True, help="Replace different keys already here (they're kept in previous/).")
++def import_cmd(source, force):
++    """Put back keys from an export block (paste it, then press Ctrl+D)."""
++    if source.name == "<stdin>" and source.isatty():
++        click.echo("Paste the whole block from BEGIN to END, then press Enter and Ctrl+D:", err=True)
++    try:
++        blob = parse_export(source.read())
++        written = import_archive(blob, KEYS_DIR, force=force)
++    except FileExistsError as e:
++        raise click.ClickException(f"Different keys are already here ({e}). Nothing was changed. "
++                                   "Use --force to replace them (the current ones are kept in previous/).")
++    except ValueError as e:
++        raise click.ClickException(str(e))
++    click.echo(f"Restored {len(written)} file(s) to {KEYS_DIR}.")
++    keys = audiocrypto.load_all_audio_keys(KEYS_DIR)
++    if keys:
++        click.echo(f"  Audio key id: {audiocrypto.key_id(keys[0])}")
 diff --git a/src/pendant/commands/device.py b/src/pendant/commands/device.py
 index e05b050..a56d9ce 100644
 --- a/src/pendant/commands/device.py
@@ -1034,10 +1209,10 @@ index e05b050..a56d9ce 100644
 +        click.echo("LED: off" if level == 0 else f"LED brightness: {level}")
 diff --git a/src/pendant/commands/sync.py b/src/pendant/commands/sync.py
 new file mode 100644
-index 0000000..9fe237a
+index 0000000..b0cd8ad
 --- /dev/null
 +++ b/src/pendant/commands/sync.py
-@@ -0,0 +1,55 @@
+@@ -0,0 +1,57 @@
 +"""`pendant sync` and `pendant backup`: run the scripts install-sync.sh / install-backup.sh
 +put in ~/.local/share/pendant/.
 +
@@ -1055,7 +1230,7 @@ index 0000000..9fe237a
 +DEFAULT_SCRIPT = SCRIPTS_DIR / "pendant-sync"
 +
 +
-+def _run_script(ctx, script: Path, installer: str):
++def _run_script(ctx, script: Path, installer: str, args=()):
 +    if not script.is_file():
 +        raise click.ClickException(
 +            f"This isn't installed ({script} is missing). Run {installer} first."
@@ -1063,7 +1238,7 @@ index 0000000..9fe237a
 +    env = dict(os.environ)
 +    if ctx.obj.get("address"):
 +        env["PENDANT_ADDRESS"] = ctx.obj["address"]
-+    os.execve(str(script), [str(script)], env)
++    os.execve(str(script), [str(script), *args], env)
 +
 +
 +@click.command()
@@ -1075,11 +1250,13 @@ index 0000000..9fe237a
 +
 +
 +@click.command()
++@click.option("--check", is_flag=True,
++              help="Don't copy: check that every file here is in the backup, intact (nothing is downloaded).")
 +@click.pass_context
-+def backup(ctx):
++def backup(ctx, check):
 +    """Copy ~/recordings to Google Drive, encrypted on this computer first."""
 +    script = Path(os.environ.get("PENDANT_BACKUP_SCRIPT", SCRIPTS_DIR / "pendant-backup"))
-+    _run_script(ctx, script, "install-backup.sh")
++    _run_script(ctx, script, "install-backup.sh", ["--check"] if check else [])
 +
 +
 +@click.command(context_settings={"ignore_unknown_options": True, "allow_extra_args": True,
@@ -2168,6 +2345,178 @@ index 0000000..cc2b137
 +    _, _, key = pendant_and_keys
 +    kid = audiocrypto.key_id(key)
 +    assert len(kid) == 12 and key.hex()[:12] != kid
+diff --git a/tests/test_durable_save.py b/tests/test_durable_save.py
+new file mode 100644
+index 0000000..7423ae6
+--- /dev/null
++++ b/tests/test_durable_save.py
+@@ -0,0 +1,74 @@
++"""Nothing is freed on the pendant unless every saved file is on disk exactly as downloaded."""
++from pathlib import Path
++
++import click
++import pytest
++
++from pendant.commands import audio
++from pendant.commands.audio import _save_and_free, verify_saved
++from test_sync_safety import FakeClient
++
++
++def test_frees_after_files_are_verified(tmp_path, capsys):
++    c = FakeClient([100, 101, 102])
++    _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=True)
++    assert c.sent == [("delete_flash_page", {"index": 102})]
++    assert "identical to the download" in capsys.readouterr().out
++
++
++def test_altered_on_write_frees_nothing(tmp_path, monkeypatch):
++    real = Path.write_bytes
++    monkeypatch.setattr(Path, "write_bytes", lambda self, data: real(self, bytes(data[:-1]) + b"X"))
++    c = FakeClient([1, 2, 3])
++    with pytest.raises(click.ClickException, match="don't match"):
++        _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=True)
++    assert c.sent == []
++
++
++def test_file_gone_before_freeing_frees_nothing(tmp_path, monkeypatch):
++    real = audio.verify_saved
++
++    def vanish_then_verify(expected):
++        for p in expected:
++            if p.suffix == ".opus":
++                p.unlink()
++        return real(expected)
++
++    monkeypatch.setattr(audio, "verify_saved", vanish_then_verify)
++    c = FakeClient([1, 2, 3])
++    with pytest.raises(click.ClickException):
++        _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=True)
++    assert c.sent == []
++
++
++def test_metadata_is_checked_too(tmp_path, monkeypatch):
++    real = audio.verify_saved
++
++    def damage_json(expected):
++        for p in expected:
++            if p.suffix == ".json":
++                p.write_text("{}")
++        return real(expected)
++
++    monkeypatch.setattr(audio, "verify_saved", damage_json)
++    c = FakeClient([1, 2, 3])
++    with pytest.raises(click.ClickException):
++        _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=True)
++    assert c.sent == []
++
++
++def test_verify_saved_reports_each_problem(tmp_path):
++    a, b = tmp_path / "a.opus", tmp_path / "b.json"
++    a.write_bytes(b"abc")
++    b.write_bytes(b"{}")
++    exp = {a: (3, audio._sha256(b"abc")), b: (2, audio._sha256(b"[]"))}
++    problems = verify_saved(exp)
++    assert len(problems) == 1 and "b.json" in problems[0]
++    a.unlink()
++    assert len(verify_saved(exp)) == 2
++
++
++def test_no_flag_writes_but_does_not_need_verifying(tmp_path):
++    c = FakeClient([1, 2])
++    _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=False)
++    assert c.sent == [] and list(tmp_path.glob("*.opus"))
+diff --git a/tests/test_key_export.py b/tests/test_key_export.py
+new file mode 100644
+index 0000000..19d1bf4
+--- /dev/null
++++ b/tests/test_key_export.py
+@@ -0,0 +1,86 @@
++"""pendant crypto export / import: keys to a password manager and back, intact."""
++import os
++
++import pytest
++
++from pendant.commands import crypto
++from pendant.core import audiocrypto
++
++
++def make_keys(d):
++    if not (d / audiocrypto.PRIVATE_FILE).exists():
++        audiocrypto.generate_keypair(d)
++    from cryptography.hazmat.primitives.asymmetric import ec
++    from cryptography.hazmat.primitives import serialization
++    dev = ec.generate_private_key(ec.SECP256R1()).public_key().public_bytes(
++        serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
++    audiocrypto.save_audio_key(dev, d)
++    (d / "backup-crypt.txt").write_text("password=abc\npassword2=def\n")
++    return audiocrypto.load_audio_key(d)
++
++
++def test_round_trip_to_a_new_pi(tmp_path):
++    old, new = tmp_path / "old", tmp_path / "new"
++    key = make_keys(old)
++    text = crypto.export_text(old)
++    assert text.startswith(crypto.BEGIN) and "audio key id: " + audiocrypto.key_id(key) in text
++    written = crypto.import_archive(crypto.parse_export("my vault notes\n" + text + "\nmore notes"), new)
++    assert set(written) >= {"audio.key", "server_private.pem", "backup-crypt.txt"}
++    for name in written:
++        assert (new / name).read_bytes() == (old / name).read_bytes()
++        assert os.stat(new / name).st_mode & 0o777 == 0o600
++    assert os.stat(new).st_mode & 0o777 == 0o700
++
++
++def test_damaged_block_is_refused(tmp_path):
++    make_keys(tmp_path / "k")
++    text = crypto.export_text(tmp_path / "k")
++    lines = text.splitlines()
++    i = next(n for n, l in enumerate(lines) if l and ":" not in l and not l.startswith("-----"))
++    lines[i] = ("B" if lines[i][0] != "B" else "C") + lines[i][1:]
++    with pytest.raises(ValueError, match="checksum|damaged"):
++        crypto.parse_export("\n".join(lines))
++    with pytest.raises(ValueError, match="checksum"):
++        crypto.parse_export("\n".join(l for l in text.splitlines() if l != lines[i + 1]))   # a line lost in copying
++    with pytest.raises(ValueError, match="no PENDANT KEYS"):
++        crypto.parse_export("hello")
++
++
++def test_never_overwrites_different_keys_without_force(tmp_path):
++    a, b = tmp_path / "a", tmp_path / "b"
++    make_keys(a)
++    other = make_keys(b)
++    blob = crypto.parse_export(crypto.export_text(a))
++    with pytest.raises(FileExistsError):
++        crypto.import_archive(blob, b)
++    assert audiocrypto.load_audio_key(b) == other            # untouched
++    crypto.import_archive(blob, b, force=True)
++    assert audiocrypto.load_audio_key(b) == audiocrypto.load_audio_key(a)
++    assert other in audiocrypto.load_all_audio_keys(b)        # the replaced key kept in previous/
++
++
++def test_same_keys_import_again_is_fine(tmp_path):
++    a = tmp_path / "a"
++    make_keys(a)
++    blob = crypto.parse_export(crypto.export_text(a))
++    crypto.import_archive(blob, a)                            # nothing different: no error
++
++
++def test_earlier_generations_travel_too(tmp_path):
++    a, b = tmp_path / "a", tmp_path / "b"
++    first = make_keys(a)
++    make_keys(a)                                              # setkey with a reset pendant: first kept in previous/
++    crypto.import_archive(crypto.parse_export(crypto.export_text(a)), b)
++    assert first in audiocrypto.load_all_audio_keys(b)
++
++
++def test_unsafe_archive_entries_refused(tmp_path):
++    import io, tarfile
++    buf = io.BytesIO()
++    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
++        info = tarfile.TarInfo("../escape")
++        info.size = 1
++        tar.addfile(info, io.BytesIO(b"x"))
++    with pytest.raises(ValueError, match="unexpected"):
++        crypto.import_archive(buf.getvalue(), tmp_path / "k")
++    assert not (tmp_path / "escape").exists()
 diff --git a/tests/test_protocol.py b/tests/test_protocol.py
 index ad39d00..20fbd8c 100644
 --- a/tests/test_protocol.py
@@ -2268,10 +2617,10 @@ index ad39d00..20fbd8c 100644
 +    assert raw == b"\x08\x01\x18\x01"  # red=1, blue=3
 diff --git a/tests/test_sync_command.py b/tests/test_sync_command.py
 new file mode 100644
-index 0000000..0943e9e
+index 0000000..aeea62b
 --- /dev/null
 +++ b/tests/test_sync_command.py
-@@ -0,0 +1,60 @@
+@@ -0,0 +1,76 @@
 +"""`pendant sync` hands off to the installed sync script."""
 +
 +import os
@@ -2332,6 +2681,22 @@ index 0000000..0943e9e
 +    monkeypatch.setenv("PENDANT_WHISPER_PYTHON", str(tmp_path / "nope"))
 +    result = CliRunner().invoke(cli, ["transcribe"])
 +    assert result.exit_code != 0 and "install-transcribe.sh" in result.output
++
++
++def test_backup_check_passes_the_flag(tmp_path, monkeypatch):
++    import os
++    from click.testing import CliRunner
++    from pendant.cli import cli
++    script = tmp_path / "pendant-backup"
++    script.write_text("#!/bin/sh\n")
++    script.chmod(0o755)
++    monkeypatch.setenv("PENDANT_BACKUP_SCRIPT", str(script))
++    seen = {}
++    monkeypatch.setattr(os, "execve", lambda path, argv, env: seen.update(argv=argv))
++    CliRunner().invoke(cli, ["backup", "--check"])
++    assert seen["argv"] == [str(script), "--check"]
++    CliRunner().invoke(cli, ["backup"])
++    assert seen["argv"] == [str(script)]
 diff --git a/tests/test_sync_safety.py b/tests/test_sync_safety.py
 new file mode 100644
 index 0000000..6bdd2af

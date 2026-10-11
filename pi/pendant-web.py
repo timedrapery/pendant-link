@@ -293,6 +293,33 @@ def parse_range(header, size):
     return (start, end) if start <= end else None
 
 
+def from_home_network(addr: str) -> bool:
+    """True for this computer and private home-network addresses (192.168.x.x, 10.x.x.x,
+    fe80::, ...). The page is plain HTTP with a password, which is fine across your own
+    Wi-Fi but not across the internet, so anything else is turned away even with the right
+    password (say, if a router port were opened to it by mistake)."""
+    import ipaddress
+    try:
+        ip = ipaddress.ip_address(addr.split("%", 1)[0])
+    except ValueError:
+        return False
+    if getattr(ip, "ipv4_mapped", None):
+        ip = ip.ipv4_mapped
+    return ip.is_loopback or ip.is_private or ip.is_link_local
+
+
+def tighten_settings(path: Path):
+    """The settings file holds the page's password: keep it readable by its owner only."""
+    try:
+        mode = path.stat().st_mode & 0o777
+        if mode & 0o077:
+            path.chmod(0o600)
+            return True
+    except OSError:
+        pass
+    return False
+
+
 class Handler(BaseHTTPRequestHandler):
     root = None
     password = None
@@ -301,6 +328,11 @@ class Handler(BaseHTTPRequestHandler):
         pass  # keep the journal quiet; nothing about what was viewed is logged
 
     def _auth(self):
+        if not from_home_network(self.client_address[0]):
+            self.send_response(403)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return False
         if check_password(self.headers.get("Authorization"), self.password):
             return True
         self.send_response(401)
@@ -399,11 +431,13 @@ def make_server(root: Path, password: str, host="0.0.0.0", port=8765):
 
 
 def main():
+    if tighten_settings(Path.home() / ".config" / "pendant" / "env"):
+        print("Made ~/.config/pendant/env readable by you only (it holds this page's password).", flush=True)
     password = setting("PENDANT_WEB_PASSWORD")
     if not password:
         sys.exit("PENDANT_WEB_PASSWORD isn't set. Run install-web.sh, which makes one.")
     port = int(setting("PENDANT_WEB_PORT", "8765"))
-    server = make_server(archive(), password, port=port)
+    server = make_server(archive(), password, host=setting("PENDANT_WEB_HOST", "0.0.0.0"), port=port)
     print(f"Serving your pendant days on port {port}", flush=True)
     server.serve_forever()
 
