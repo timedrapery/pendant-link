@@ -1,8 +1,8 @@
 [Unit]
-Description=Sync the Limitless pendant every 15 minutes
+Description=Sync the Limitless pendant every 30 minutes
 
 [Timer]
-OnCalendar=*:0/15
+OnCalendar=*:0/30
 RandomizedDelaySec=30
 Persistent=true
 

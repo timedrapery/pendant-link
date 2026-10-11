@@ -58,8 +58,22 @@ curl -fsSL "$BASE/pendant_file.py" -o "$HOME/.local/share/pendant/pendant_file.p
 chmod +x "$HOME/.local/share/pendant/pendant-sync"
 rm -f "$HOME/.local/bin/pendant-sync"   # older installs put it here
 curl -fsSL "$BASE/pendant-sync.service" -o "$HOME/.config/systemd/user/pendant-sync.service"
-curl -fsSL "$BASE/pendant-sync.timer" -o "$HOME/.config/systemd/user/pendant-sync.timer"
-# Update only our two lines in the settings file; keep everything else (web password, options).
+# How often to sync, in minutes (PENDANT_SYNC_EVERY in ~/.config/pendant/env; default 30).
+# Each sync wakes the pendant's radio, so less often is easier on its battery; the pendant
+# holds days of recordings, so nothing is lost by waiting.
+EVERY="${PENDANT_SYNC_EVERY:-$(sed -n 's/^PENDANT_SYNC_EVERY=//p' "$HOME/.config/pendant/env" 2>/dev/null | tail -1)}"
+EVERY="${EVERY:-30}"
+case "$EVERY" in
+  15|20|30) CAL="*:0/$EVERY" ;;
+  60)       CAL="*:00" ;;
+  120|180|240|360) CAL="0/$((EVERY / 60)):00" ;;
+  *) echo "PENDANT_SYNC_EVERY must be 15, 20, 30, 60, 120, 180, 240 or 360 (minutes), not '$EVERY'. Using 30."
+     EVERY=30; CAL="*:0/30" ;;
+esac
+curl -fsSL "$BASE/pendant-sync.timer" \
+  | sed -e "s|^OnCalendar=.*|OnCalendar=$CAL|" -e "s|^Description=.*|Description=Sync the Limitless pendant every $EVERY minutes|" \
+  > "$HOME/.config/systemd/user/pendant-sync.timer"
+# Update only our own lines in the settings file; keep everything else (web password, options).
 ENV="$HOME/.config/pendant/env"
 touch "$ENV"
 set_setting() {
@@ -71,6 +85,9 @@ set_setting() {
 }
 set_setting PENDANT_ADDRESS "$ADDRESS"
 set_setting PENDANT_BIN "$PENDANT_BIN"
+set_setting PENDANT_SYNC_EVERY "$EVERY"
 systemctl --user daemon-reload
+systemctl --user is-enabled -q pendant-sync.timer 2>/dev/null && systemctl --user restart pendant-sync.timer
+say "Syncing every $EVERY minutes"
 
 say "Installed. Next: run 'pendant sync' once by hand and check ~/recordings."

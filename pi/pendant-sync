@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Pull new recordings off the pendant, file them by date, and free only those pages on the pendant.
-# Run it as `pendant sync`; the pendant-sync timer does that every 15 minutes.
+# Run it as `pendant sync`; the pendant-sync timer does that every 30 minutes
+# (PENDANT_SYNC_EVERY in ~/.config/pendant/env changes it; see install-sync.sh).
 set -euo pipefail
 
 # Settings saved by install-sync.sh; anything already set in the shell wins.
@@ -39,8 +40,15 @@ if ! flock -n 9; then
   exit 0
 fi
 
-# Out of range or asleep: skip quietly and try again next time.
-if ! timeout 45 "$PENDANT" status >/dev/null 2>&1; then
+# Always hang up when done, even if something below fails: an open Bluetooth link keeps
+# the pendant's radio busy and drains its battery.
+hang_up() { timeout 10 bluetoothctl disconnect "$PENDANT_ADDRESS" >/dev/null 2>&1 || true; }
+trap hang_up EXIT
+
+# Out of range or asleep: skip quietly and try again next time. (Just the Bluetooth link,
+# which the download below then uses, so each sync connects once.)
+timeout 30 bluetoothctl connect "$PENDANT_ADDRESS" >/dev/null 2>&1 || true
+if ! bluetoothctl info "$PENDANT_ADDRESS" 2>/dev/null | grep -q "Connected: yes"; then
   log "Pendant not reachable; skipping."
   exit 0
 fi

@@ -1313,7 +1313,7 @@ index 5278f23..ca072c2 100644
          elif rtype == "battery_status":
              print(f"\n  Battery: {response.get('level', 0)}%")
 diff --git a/src/pendant/core/dbus_client.py b/src/pendant/core/dbus_client.py
-index a5867ef..e71a566 100644
+index a5867ef..b321677 100644
 --- a/src/pendant/core/dbus_client.py
 +++ b/src/pendant/core/dbus_client.py
 @@ -1,10 +1,11 @@
@@ -1437,6 +1437,36 @@ index a5867ef..e71a566 100644
      def check_connection(self) -> bool:
          """Check if device is connected."""
          try:
+@@ -212,12 +252,28 @@ class DBusClient:
+             self.loop.quit()
+ 
+     def disconnect(self):
+-        """Clean up."""
++        """Stop listening, then hang up the Bluetooth link.
++
++        Leaving the link open keeps the pendant's radio busy between syncs, which drains its
++        battery: a trusted device otherwise stays connected indefinitely. Disconnecting through
++        BlueZ also turns off its automatic reconnect until the next command connects again.
++        Set PENDANT_STAY_CONNECTED=yes to keep the link up (as pendant-cli used to).
++        """
++        import os
+         try:
+             if self.data_char:
+                 self.data_char.StopNotify()
+         except Exception:
+             pass
++        if os.environ.get("PENDANT_STAY_CONNECTED", "").lower() in ("1", "yes", "true"):
++            return
++        try:
++            if self.bus is not None:
++                import dbus
++                device = dbus.Interface(self.bus.get_object('org.bluez', self.device_path), 'org.bluez.Device1')
++                device.Disconnect()
++        except Exception:
++            pass  # already gone, or out of range
+ 
+ 
+ def get_battery_from_dbus(address: str = DEFAULT_PENDANT_ADDRESS) -> Optional[int]:
 diff --git a/src/pendant/core/opus.py b/src/pendant/core/opus.py
 index 0a797ea..16d9f6b 100644
 --- a/src/pendant/core/opus.py
@@ -2524,10 +2554,10 @@ index 0000000..6bdd2af
 +    assert c.sent == []
 diff --git a/tests/test_unreadable_pages.py b/tests/test_unreadable_pages.py
 new file mode 100644
-index 0000000..76e1635
+index 0000000..df1d17d
 --- /dev/null
 +++ b/tests/test_unreadable_pages.py
-@@ -0,0 +1,133 @@
+@@ -0,0 +1,157 @@
 +"""A page the pendant can't read must not stop freeing for good (Oct 10: pages 6055-6473)."""
 +import json
 +
@@ -2661,3 +2691,27 @@ index 0000000..76e1635
 +    assert c.bad_pages[6055]["flash_page"] == "0102ff" and c.bad_pages[6055]["error"] == 1
 +    if 6056 in c.bad_page_indices:  # only when the bytes really don't parse as a page
 +        assert c.bad_pages[6056]["flash_page"] == "fffefdfc"
++
++
++def test_disconnect_hangs_up_the_bluetooth_link(monkeypatch):
++    import sys, types
++    from pendant.core.dbus_client import DBusClient
++    calls = []
++
++    class FakeIface:
++        def __init__(self, obj, name):
++            self.name = name
++        def Disconnect(self):
++            calls.append(self.name)
++
++    fake_dbus = types.SimpleNamespace(Interface=FakeIface)
++    monkeypatch.setitem(sys.modules, "dbus", fake_dbus)
++    c = DBusClient("AA:BB:CC:DD:EE:FF")
++    c.bus = types.SimpleNamespace(get_object=lambda svc, path: (svc, path))
++    c.disconnect()
++    assert calls == ["org.bluez.Device1"]
++
++    calls.clear()
++    monkeypatch.setenv("PENDANT_STAY_CONNECTED", "yes")
++    c.disconnect()
++    assert calls == []
