@@ -286,18 +286,19 @@ index fb98890..4c861ff 100644
  # Register command groups
  cli.add_command(bluetooth.bt)
 diff --git a/src/pendant/commands/audio.py b/src/pendant/commands/audio.py
-index cf0b2e6..f2791cf 100644
+index cf0b2e6..79f180c 100644
 --- a/src/pendant/commands/audio.py
 +++ b/src/pendant/commands/audio.py
-@@ -1,6 +1,7 @@
+@@ -1,6 +1,8 @@
  """Audio commands: download, decode, record, stop."""
  
  import json
++import os
 +import time
  from datetime import datetime
  from pathlib import Path
  
-@@ -8,15 +9,21 @@ import click
+@@ -8,15 +10,21 @@ import click
  
  from pendant.core.config import MIN_VALID_TIMESTAMP_MS
  from pendant.core.dbus_client import DBusClient
@@ -321,7 +322,7 @@ index cf0b2e6..f2791cf 100644
      """Download stored recordings from the pendant."""
      from gi.repository import GLib
  
-@@ -28,13 +35,15 @@ def download(ctx, decode, output):
+@@ -28,13 +36,15 @@ def download(ctx, decode, output):
      # Try to load private key for decryption
      client.private_key = load_private_key()
      if client.private_key:
@@ -338,7 +339,7 @@ index cf0b2e6..f2791cf 100644
  
      def start_download():
          click.echo("\nDownloading audio (this may take a while)...")
-@@ -42,8 +51,32 @@ def download(ctx, decode, output):
+@@ -42,8 +52,102 @@ def download(ctx, decode, output):
          return False
  
      GLib.timeout_add_seconds(2, start_download)
@@ -362,18 +363,88 @@ index cf0b2e6..f2791cf 100644
 +    GLib.timeout_add(500, check_idle)
 +    try:
 +        client.run_with_timeout(max_time)
-+        _save_and_free(client, decode, output_dir, delete_after)
-+        write_health(client, output_dir, address)
++        freeing = _save_and_free(client, decode, output_dir, delete_after)
++        write_health(client, output_dir, address, freeing)
 +    finally:
 +        client.disconnect()
 +
 +
++# A page the pendant can't read (it says so itself, or it arrives garbled) stops freeing at that
++# page, so it can be tried again. A page that fails in this many separate downloads is taken to
++# be lost on the pendant too: what it sent is saved, and freeing goes past it. Without this, one
++# bad page at the front would stop freeing for good and the pendant would fill up.
++BAD_PAGE_TRIES = 3
++BAD_PAGE_HISTORY = ".unreadable-pages.json"
++
++
++def _archive_root(output_dir):
++    out = Path(output_dir)
++    return out.parent if out.name == ".incoming" else out
++
++
++def _bad_page_tries():
++    try:
++        return max(1, int(os.environ.get("PENDANT_BAD_PAGE_TRIES", BAD_PAGE_TRIES)))
++    except ValueError:
++        return BAD_PAGE_TRIES
++
++
++def update_bad_page_history(root, bad, received):
++    """Count, per page, how many separate downloads found it unreadable.
++
++    Pages read fine this time, and pages outside what was received (already freed, or from
++    before a factory reset restarted the numbering), are dropped. Returns {index: times seen}.
++    """
++    path = Path(root) / BAD_PAGE_HISTORY
++    try:
++        history = json.loads(path.read_text()).get("pages", {})
++    except (OSError, ValueError, AttributeError):
++        history = {}
++    received = set(received)
++    lo, hi = (min(received), max(received)) if received else (None, None)
++    now = datetime.now().isoformat(timespec="seconds")
++    kept = {}
++    for key, rec in history.items():
++        i = int(key)
++        if lo is not None and lo <= i <= hi and i not in received:
++            kept[key] = rec  # not in this download's run (a gap): leave its count alone
++    for i in sorted(set(bad)):
++        rec = history.get(str(i), {"seen": 0, "first_seen": now})
++        rec["seen"] = int(rec.get("seen", 0)) + 1
++        rec["last_seen"] = now
++        kept[str(i)] = rec
++    try:
++        tmp = path.with_name(path.name + ".tmp")
++        tmp.write_text(json.dumps({"pages": kept}, indent=1))
++        tmp.replace(path)
++    except OSError:
++        pass
++    return {int(k): v["seen"] for k, v in kept.items()}
++
++
++def _ranges(indices):
++    """[5, 6, 7, 9] -> '5-7, 9'"""
++    out, run = [], []
++    for i in sorted(set(indices)):
++        if run and i != run[-1] + 1:
++            out.append(run)
++            run = []
++        run.append(i)
++    if run:
++        out.append(run)
++    return ", ".join(f"{r[0]}-{r[-1]}" if len(r) > 1 else str(r[0]) for r in out)
++
++
 +def _save_and_free(client, decode, output_dir, delete_after):
-+    """Write the downloaded audio to disk, then (optionally) free those pages on the pendant."""
++    """Write the downloaded audio to disk, then (optionally) free those pages on the pendant.
++
++    Returns what happened with freeing, for the health file.
++    """
++    freeing = {"freed": False, "reason": None, "unreadable_pages_waiting": 0}
  
      # Save audio
      click.echo(f"\n\nDownload complete!")
-@@ -72,26 +105,36 @@ def download(ctx, decode, output):
+@@ -72,26 +176,47 @@ def download(ctx, decode, output):
          timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
  
      opus_fname = None
@@ -408,6 +479,17 @@ index cf0b2e6..f2791cf 100644
 +            click.echo("  Your audio key didn't fit these chunks.")
 +        else:
 +            click.echo("  No audio key is set up here. See 'pendant crypto --help'.")
++
++    bad_pages = getattr(client, "bad_pages", None) or {}
++    bad_file_ok = False
++    if bad_pages:
++        # What the pendant sent for each page it couldn't read, kept whole, before any freeing.
++        fname = output_dir / f"pendant_{timestamp}.badpages.jsonl"
++        fname.write_text("".join(json.dumps(bad_pages[i]) + "\n" for i in sorted(bad_pages)))
++        bad_file_ok = fname.exists() and fname.stat().st_size > 0
++        if client.opus_data or client.pcm_data:
++            written.append(fname)
++        click.echo(f"Saved what the pendant sent for {len(bad_pages)} unreadable page(s): {fname}")
  
      # Save timestamp metadata as JSON sidecar
 -    if client.page_timestamps and client.opus_data:
@@ -416,7 +498,7 @@ index cf0b2e6..f2791cf 100644
          # Check if timestamps are real (synced) or just device uptime
          first_ts = client.page_timestamps[0].get("absolute_timestamp_ms", 0) if client.page_timestamps else 0
          timestamps_synced = first_ts > MIN_VALID_TIMESTAMP_MS
-@@ -102,20 +145,95 @@ def download(ctx, decode, output):
+@@ -102,25 +227,205 @@ def download(ctx, decode, output):
              "download_time_iso": datetime.now().isoformat(),
              "timestamps_synced": timestamps_synced,
              "total_pages": client.page_count,
@@ -445,6 +527,7 @@ index cf0b2e6..f2791cf 100644
 +    if delete_after and undecrypted:
 +        click.echo("Some audio couldn't be decrypted, so nothing will be deleted from the pendant. "
 +                   "It's all still there, and saved here too.")
++        freeing["reason"] = "some audio couldn't be decrypted"
 +    elif delete_after:
 +        oldest, held = pendant_page_range(client)
 +        bad = getattr(client, "bad_page_indices", [])
@@ -452,7 +535,17 @@ index cf0b2e6..f2791cf 100644
 +        if first is not None:
 +            click.echo(f"  Pendant reports oldest page {oldest if oldest is not None else 'unknown'}, "
 +                       f"{held if held is not None else 'unknown'} pages held; download starts at {first}.")
-+        through = safe_delete_index(client.page_indices, bad, oldest)
++        tries = _bad_page_tries()
++        seen = update_bad_page_history(_archive_root(output_dir), bad, client.page_indices) if client.page_indices else {}
++        # Only pages whose bytes were saved this time, and that failed in enough separate downloads.
++        settled = {i for i in bad if seen.get(i, 0) >= tries and bad_file_ok and i in bad_pages}
++        waiting = sorted(set(bad) - settled)
++        freeing["unreadable_pages_waiting"] = len(waiting)
++        if waiting:
++            n = min(seen.get(i, 1) for i in waiting)
++            click.echo(f"  Unreadable page(s) {_ranges(waiting)}: failed in {n} of {tries} downloads so far. "
++                       f"They stay on the pendant for another try.")
++        through = safe_delete_index(client.page_indices, bad, oldest, settled_bad=settled)
 +        refusal = None
 +        if first is None:
 +            refusal = "Nothing downloaded, so nothing to delete."
@@ -463,13 +556,21 @@ index cf0b2e6..f2791cf 100644
 +            refusal = (f"The pendant's oldest page is {oldest} but the download started at {first}, "
 +                       "so nothing will be deleted. Everything stays on the pendant.")
 +        elif through is None:
-+            refusal = f"The first page ({first}) was unreadable, so nothing will be deleted."
++            refusal = (f"The first page ({first}) was unreadable, so nothing will be deleted this time. "
++                       f"After it fails in {tries} separate downloads, it's taken as lost on the pendant too "
++                       "and freeing goes past it.")
 +        elif held and (through - first + 1) < held:
 +            refusal = (f"The pendant held {held} pages but the unbroken download covers {through - first + 1}, "
 +                       "so nothing will be deleted. Everything stays on the pendant.")
 +        if refusal:
 +            click.echo(refusal)
++            freeing["reason"] = refusal
 +        else:
++            passed = sorted(i for i in settled if i <= through)
++            if passed:
++                click.echo(f"Page(s) {_ranges(passed)} failed in {tries} separate downloads, so the pendant can't "
++                           f"read them either. What it sent for them is saved in the .badpages.jsonl file; "
++                           "freeing goes past them.")
 +            if through < max(client.page_indices):
 +                why = "unreadable" if (through + 1) in bad else "missing"
 +                click.echo(f"Warning: page {through + 1} is {why}; keeping it and everything after it on the pendant.")
@@ -496,10 +597,13 @@ index cf0b2e6..f2791cf 100644
 +            reply = ack["reply"]
 +            if reply is None:
 +                click.echo("Freed (no confirmation from the pendant; the next sync's oldest page will show it).")
++                freeing["freed"] = True
 +            elif reply.get("response_success"):
 +                click.echo("Freed (the pendant confirmed).")
++                freeing["freed"] = True
 +            else:
 +                click.echo(f"The pendant refused to free pages: {reply.get('response_error')}. Everything stays on it.")
++                freeing["reason"] = f"the pendant refused: {reply.get('response_error')}"
 +
      # Auto-decode opus to WAV if requested
      if decode and opus_fname and opus_fname.exists():
@@ -514,10 +618,11 @@ index cf0b2e6..f2791cf 100644
          except Exception as e:
              click.echo(f"Decode failed: {e}")
              click.echo(f"  Manual: pendant decode {opus_fname}")
-@@ -123,6 +241,73 @@ def download(ctx, decode, output):
+     elif opus_fname and not decode:
          click.echo(f"  Decode: pendant decode {opus_fname}")
- 
- 
++    return freeing
++
++
 +def _key_id(client):
 +    keys = getattr(client, "private_key", None)
 +    if not keys:
@@ -543,14 +648,19 @@ index cf0b2e6..f2791cf 100644
 +    return oldest, held
 +
 +
-+def write_health(client, output_dir, address=None):
++def write_health(client, output_dir, address=None, freeing=None):
 +    """A small status file so a morning note can say when the pendant was last seen.
 +
 +    Written to the archive root (the parent of .incoming) as pendant-health.json:
-+    last sync time, battery, storage, pages pulled. Nothing about what was said.
++    last sync time, battery, storage, pages pulled, and whether pages could be freed.
++    Nothing about what was said.
 +    """
-+    out = Path(output_dir)
-+    root = out.parent if out.name == ".incoming" else out
++    root = _archive_root(output_dir)
++    path = root / "pendant-health.json"
++    try:
++        previous = json.loads(path.read_text())
++    except (OSError, ValueError):
++        previous = {}
 +    battery = (client.last_battery or {}).get("level")
 +    if battery is None and address:
 +        from pendant.core.dbus_client import get_battery_from_dbus
@@ -563,8 +673,18 @@ index cf0b2e6..f2791cf 100644
 +        "storage_used_percent": (client.last_status or {}).get("storage_used_percent"),
 +        "recording": (client.last_status or {}).get("recording_label"),
 +    }
++    if freeing is not None and client.page_count:
++        if freeing.get("freed"):
++            health["last_freed"] = health["last_sync"]
++        elif previous.get("last_freed"):
++            health["last_freed"] = previous["last_freed"]
++        health["not_freed_reason"] = None if freeing.get("freed") else freeing.get("reason")
++        health["unreadable_pages_waiting"] = freeing.get("unreadable_pages_waiting", 0)
++    elif previous:
++        for k in ("last_freed", "not_freed_reason", "unreadable_pages_waiting"):
++            if k in previous:
++                health[k] = previous[k]
 +    try:
-+        path = root / "pendant-health.json"
 +        tmp = path.with_name(path.name + ".tmp")
 +        tmp.write_text(json.dumps(health, indent=2))
 +        tmp.replace(path)
@@ -583,11 +703,9 @@ index cf0b2e6..f2791cf 100644
 +        json_path.write_text(json.dumps(meta, indent=2))
 +    except (OSError, ValueError) as e:
 +        click.echo(f"  (couldn't add the timeline: {e})")
-+
-+
+ 
+ 
  @click.command()
- @click.argument('input_file', type=click.Path(exists=True))
- @click.argument('output_file', type=click.Path(), required=False)
 diff --git a/src/pendant/commands/crypto.py b/src/pendant/commands/crypto.py
 index cc35325..537bd44 100644
 --- a/src/pendant/commands/crypto.py
@@ -1195,7 +1313,7 @@ index 5278f23..ca072c2 100644
          elif rtype == "battery_status":
              print(f"\n  Battery: {response.get('level', 0)}%")
 diff --git a/src/pendant/core/dbus_client.py b/src/pendant/core/dbus_client.py
-index a5867ef..2ff11d5 100644
+index a5867ef..e71a566 100644
 --- a/src/pendant/core/dbus_client.py
 +++ b/src/pendant/core/dbus_client.py
 @@ -1,10 +1,11 @@
@@ -1211,7 +1329,7 @@ index a5867ef..2ff11d5 100644
  from .bluetooth import ensure_connected
  
  
-@@ -27,11 +28,19 @@ class DBusClient:
+@@ -27,11 +28,20 @@ class DBusClient:
          self.opus_data = bytearray()
          self.pcm_data = bytearray()
          self.encrypted_data = bytearray()
@@ -1226,12 +1344,13 @@ index a5867ef..2ff11d5 100644
 +        self.page_indices = []  # StorageBufferMsg.index of each page received
 +        self.page_errors = 0  # pages the pendant flagged as unreadable
 +        self.bad_page_indices = []  # which ones
++        self.bad_pages = {}  # index -> what the pendant sent for it, kept whole (see audio.py)
 +        self.device_info = None  # most recent device_info reply (oldest/newest page)
 +        self.last_page_time = None  # time.monotonic() of the latest page
  
      def _init_dbus(self):
          """Initialize D-Bus connection."""
-@@ -74,22 +83,25 @@ class DBusClient:
+@@ -74,22 +84,25 @@ class DBusClient:
          self.responses.append(rtype)
  
          if rtype == "device_info":
@@ -1265,16 +1384,17 @@ index a5867ef..2ff11d5 100644
              print(f"\n  Battery: {response.get('level', 0)}%")
              if response.get('charging'):
                  print(f"  Charging: yes")
-@@ -99,11 +111,22 @@ class DBusClient:
+@@ -99,11 +112,24 @@ class DBusClient:
  
          elif rtype == "storage_buffer":
              self.page_count += 1
 +            self.last_page_time = time.monotonic()
 +            self.page_indices.append(response.get("index", 0))
+             flash_page = response.get("flash_page", b"")
 +            if response.get("error"):
 +                self.page_errors += 1
 +                self.bad_page_indices.append(response.get("index", 0))
-             flash_page = response.get("flash_page", b"")
++                self._keep_bad_page(response, flash_page, f"pendant reported error {int(response.get('error'))}")
              if flash_page:
                  if DEBUG_MODE:
                      print(f"\n  Page {self.page_count}: flash_page={len(flash_page)}B")
@@ -1285,10 +1405,11 @@ index a5867ef..2ff11d5 100644
 +                if page_info.get("parse_failed"):
 +                    self.page_errors += 1
 +                    self.bad_page_indices.append(response.get("index", 0))
++                    self._keep_bad_page(response, flash_page, "couldn't be parsed here")
                  # Track audio offset for this page
                  page_info["audio_offset_bytes"] = len(self.opus_data)
                  self.page_timestamps.append(page_info)
-@@ -114,7 +137,10 @@ class DBusClient:
+@@ -114,12 +140,26 @@ class DBusClient:
                  enc_str = f" enc={len(self.encrypted_data)}B" if self.encrypted_data else ""
                  print(f"\r  Page {self.page_count}: opus={len(self.opus_data)}B pcm={len(self.pcm_data)}B{enc_str}", end="", flush=True)
  
@@ -1300,6 +1421,22 @@ index a5867ef..2ff11d5 100644
              print(f"\n  Response: {rtype}")
  
          if self.on_response:
+             self.on_response(response)
+ 
++    def _keep_bad_page(self, response, flash_page, why):
++        idx = response.get("index", 0)
++        self.bad_pages[idx] = {
++            "index": idx,
++            "why": why,
++            "error": int(response.get("error") or 0),  # 1 read failed, 2 corrupt (pendant's own codes)
++            "session": response.get("session"),
++            "seq": response.get("seq"),
++            "flash_page": bytes(flash_page or b"").hex(),
++        }
++
+     def check_connection(self) -> bool:
+         """Check if device is connected."""
+         try:
 diff --git a/src/pendant/core/opus.py b/src/pendant/core/opus.py
 index 0a797ea..16d9f6b 100644
 --- a/src/pendant/core/opus.py
@@ -1340,7 +1477,7 @@ index 0a797ea..16d9f6b 100644
              offset += frame_size
              frame_count += 1
 diff --git a/src/pendant/core/protocol.py b/src/pendant/core/protocol.py
-index c342f7e..af6c93a 100644
+index c342f7e..c871278 100644
 --- a/src/pendant/core/protocol.py
 +++ b/src/pendant/core/protocol.py
 @@ -10,12 +10,46 @@ from .config import KEYS_DIR
@@ -1515,7 +1652,7 @@ index c342f7e..af6c93a 100644
                  # Chunk is not a oneof - check if audio_data field is populated
                  has_audio = chunk.HasField('audio_data') if hasattr(chunk, 'HasField') else bool(chunk.audio_data.ByteSize())
  
-@@ -339,82 +383,132 @@ class PendantProtocol:
+@@ -339,82 +383,133 @@ class PendantProtocol:
                          if DEBUG_MODE:
                              print(f"        encrypted: ciphertext={len(enc.ciphertext)}B, nonce={len(enc.nonce)}B, tag={len(enc.tag)}B")
  
@@ -1637,7 +1774,7 @@ index c342f7e..af6c93a 100644
 +    return lines
 +
 +
-+def safe_delete_index(page_indices, bad_indices=(), oldest_on_pendant=None) -> Optional[int]:
++def safe_delete_index(page_indices, bad_indices=(), oldest_on_pendant=None, settled_bad=()) -> Optional[int]:
 +    """Highest page index that can be deleted without losing anything, or None.
 +
 +    The pendant's delete command removes every page at or below an index, so:
@@ -1645,14 +1782,15 @@ index c342f7e..af6c93a 100644
 +    - that run must start at the pendant's own oldest page (if we know it), or
 +      pages before our first one would be deleted unseen;
 +    - stop before any page the pendant flagged as unreadable, so it stays for
-+      another try.
++      another try -- unless it's in settled_bad: unreadable in several separate
++      downloads, with what the pendant sent for it saved here.
 +    """
 +    indices = sorted(set(page_indices))
 +    if not indices:
 +        return None
 +    if oldest_on_pendant is not None and indices[0] != oldest_on_pendant:
 +        return None  # we didn't start at the beginning; delete nothing
-+    bad = set(bad_indices)
++    bad = set(bad_indices) - set(settled_bad)
 +    end = None
 +    for i in indices:
 +        if i in bad or (end is not None and i != end + 1):
@@ -2384,3 +2522,142 @@ index 0000000..6bdd2af
 +    c.first_status = {"storage_used_pages": 156, "oldest_flash_page": 5162, "newest_flash_page": 5300}
 +    _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=True)
 +    assert c.sent == []
+diff --git a/tests/test_unreadable_pages.py b/tests/test_unreadable_pages.py
+new file mode 100644
+index 0000000..76e1635
+--- /dev/null
++++ b/tests/test_unreadable_pages.py
+@@ -0,0 +1,133 @@
++"""A page the pendant can't read must not stop freeing for good (Oct 10: pages 6055-6473)."""
++import json
++
++from pendant.commands.audio import _save_and_free, write_health
++from pendant.core.protocol import safe_delete_index
++from test_sync_safety import FakeClient
++
++
++def bad_client(indices, bad, oldest=None, held=None):
++    c = FakeClient(indices, oldest=oldest if oldest is not None else min(indices), bad=bad)
++    c.bad_pages = {i: {"index": i, "why": "pendant reported error 1", "error": 1,
++                       "session": 1, "seq": i, "flash_page": "0a0b"} for i in bad}
++    if held is not None:
++        c.first_status = {"storage_used_pages": held, "oldest_flash_page": min(indices),
++                          "newest_flash_page": max(indices)}
++    return c
++
++
++def test_settled_bad_pages_can_be_passed():
++    assert safe_delete_index([5, 6, 7], bad_indices=[5]) is None
++    assert safe_delete_index([5, 6, 7], bad_indices=[5], settled_bad=[5]) == 7
++    assert safe_delete_index([5, 6, 7, 8], bad_indices=[6, 8], settled_bad=[6]) == 7
++
++
++def test_unreadable_first_page_is_passed_after_three_downloads(tmp_path):
++    for attempt in (1, 2):
++        c = bad_client([100, 101, 102, 103], bad=[100])
++        _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=True)
++        assert c.sent == [], f"attempt {attempt} must not free"
++    c = bad_client([100, 101, 102, 103], bad=[100])
++    _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=True)
++    assert c.sent == [("delete_flash_page", {"index": 103})]
++    saved = list(tmp_path.glob("*.badpages.jsonl"))
++    assert saved
++    rec = json.loads(saved[0].read_text().splitlines()[0])
++    assert rec["index"] == 100 and rec["flash_page"] == "0a0b"
++
++
++def test_oct_10_pendant_frees_on_the_third_sync(tmp_path):
++    bad = list(range(6055, 6474))
++    results = []
++    for _ in range(3):
++        c = bad_client(range(6055, 19008), bad=bad, held=12953)
++        _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=True)
++        results.append(c.sent)
++    assert results == [[], [], [("delete_flash_page", {"index": 19007})]]
++
++
++def test_page_that_reads_fine_later_starts_counting_again(tmp_path):
++    for _ in range(2):
++        _save_and_free(bad_client([1, 2, 3], bad=[1]), decode=False, output_dir=tmp_path, delete_after=True)
++    _save_and_free(bad_client([1, 2, 3], bad=[]), decode=False, output_dir=tmp_path, delete_after=False)
++    # a download without --delete-after doesn't count; one that read it fine does:
++    c = bad_client([1, 2, 3], bad=[])
++    _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=True)
++    assert c.sent == [("delete_flash_page", {"index": 3})]
++    c = bad_client([1, 2, 3], bad=[1])
++    _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=True)
++    assert c.sent == []  # the count started over
++
++
++def test_unreadable_middle_page_passed_after_three_downloads(tmp_path):
++    for _ in range(2):
++        c = bad_client([10, 11, 12, 13], bad=[12])
++        _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=True)
++        assert c.sent == [("delete_flash_page", {"index": 11})]
++    # in real use pages 10-11 are gone by now; the next download starts at 12,
++    # which then fails for the third time
++    c = bad_client([12, 13, 14], bad=[12])
++    _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=True)
++    assert c.sent == [("delete_flash_page", {"index": 14})]
++
++
++def test_never_passed_without_its_bytes_saved(tmp_path):
++    for _ in range(4):
++        c = bad_client([1, 2, 3], bad=[1])
++        c.bad_pages = {}  # nothing kept for it
++        _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=True)
++        assert c.sent == []
++
++
++def test_tries_can_be_set(tmp_path, monkeypatch):
++    monkeypatch.setenv("PENDANT_BAD_PAGE_TRIES", "1")
++    c = bad_client([1, 2, 3], bad=[1])
++    _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=True)
++    assert c.sent == [("delete_flash_page", {"index": 3})]
++
++
++def test_after_a_factory_reset_old_counts_are_dropped(tmp_path):
++    for _ in range(2):
++        _save_and_free(bad_client(range(6055, 6100), bad=[6055]), decode=False, output_dir=tmp_path, delete_after=True)
++    _save_and_free(bad_client([0, 1, 2], bad=[]), decode=False, output_dir=tmp_path, delete_after=True)
++    history = json.loads((tmp_path / ".unreadable-pages.json").read_text())
++    assert history["pages"] == {}
++
++
++def test_health_says_when_pages_could_not_be_freed(tmp_path):
++    inc = tmp_path / ".incoming"
++    inc.mkdir()
++    c = bad_client([1, 2, 3], bad=[1])
++    c.last_battery = {"level": 80}
++    freeing = _save_and_free(c, decode=False, output_dir=inc, delete_after=True)
++    write_health(c, inc, None, freeing)
++    h = json.loads((tmp_path / "pendant-health.json").read_text())
++    assert "unreadable" in h["not_freed_reason"]
++    assert h["unreadable_pages_waiting"] == 1
++    assert "last_freed" not in h
++
++    c = bad_client([1, 2, 3], bad=[])
++    c.last_battery = {"level": 80}
++    freeing = _save_and_free(c, decode=False, output_dir=inc, delete_after=True)
++    write_health(c, inc, None, freeing)
++    h = json.loads((tmp_path / "pendant-health.json").read_text())
++    assert h["not_freed_reason"] is None and h["last_freed"] == h["last_sync"]
++
++    empty = FakeClient([], opus=b"")
++    empty.last_battery = {"level": 79}
++    write_health(empty, inc, None, {"freed": False, "reason": None, "unreadable_pages_waiting": 0})
++    h2 = json.loads((tmp_path / "pendant-health.json").read_text())
++    assert h2["last_freed"] == h["last_freed"]  # a sync with nothing new keeps the last good free
++
++
++def test_client_keeps_what_the_pendant_sent_for_an_unreadable_page():
++    from pendant.core.dbus_client import DBusClient
++    c = DBusClient("AA:BB:CC:DD:EE:FF")
++    c._handle_response({"type": "storage_buffer", "index": 6055, "session": 2, "seq": 9,
++                        "flash_page": b"\x01\x02\xff", "error": 1})
++    c._handle_response({"type": "storage_buffer", "index": 6056, "session": 2, "seq": 10,
++                        "flash_page": b"\xff\xfe\xfd\xfc", "error": 0})  # garbled: won't parse
++    assert c.bad_page_indices[0] == 6055
++    assert c.bad_pages[6055]["flash_page"] == "0102ff" and c.bad_pages[6055]["error"] == 1
++    if 6056 in c.bad_page_indices:  # only when the bytes really don't parse as a page
++        assert c.bad_pages[6056]["flash_page"] == "fffefdfc"

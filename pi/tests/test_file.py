@@ -92,10 +92,72 @@ def test_unknown_pages_keep_both(dirs):
 def test_second_conflict_gets_r2(dirs):
     inc, arc, day = dirs
     rec(day, 1, 10, audio=b"A" * 500)
-    rec(day, 1, 3, audio=b"C" * 50, base=BASE + "_r1")
+    rec(day, 20, 30, audio=b"C" * 50, base=BASE + "_r1")
     rec(inc, 1, 4, audio=b"D" * 60)
     pf.file_incoming(inc, arc)
+    assert (day / f"{BASE}_r1.opus").read_bytes() == b"C" * 50
     assert (day / f"{BASE}_r2.opus").read_bytes() == b"D" * 60
+
+
+def test_new_copy_is_compared_with_every_filed_copy(dirs):
+    inc, arc, day = dirs
+    rec(day, 1, 10, audio=b"A" * 500)
+    rec(day, 1, 3, audio=b"C" * 50, base=BASE + "_r1")
+    rec(inc, 1, 4, audio=b"D" * 60)          # holds all of _r1, not of the plain copy
+    pf.file_incoming(inc, arc)
+    assert (day / f"{BASE}.opus").read_bytes() == b"A" * 500
+    assert (day / f"{BASE}_r1.opus").read_bytes() == b"D" * 60
+    assert not (day / f"{BASE}_r2.opus").exists()
+    assert len(list((arc / ".replaced").iterdir())) == 1
+
+
+def test_audio_prefix_proves_it_without_page_ranges(dirs):
+    inc, arc, day = dirs
+    rec(day, None, None, audio=b"start" * 20, transcript="old\n")  # filed before page ranges existed
+    rec(inc, 1, 10, audio=b"start" * 20 + b"more" * 50)
+    pf.file_incoming(inc, arc)
+    assert (day / f"{BASE}.opus").read_bytes() == b"start" * 20 + b"more" * 50
+    assert not (day / f"{BASE}_r1.opus").exists()
+    assert len(list((arc / ".replaced").iterdir())) == 1
+
+
+def test_pages_never_freed_leave_one_copy(dirs):
+    """Oct 10: an unreadable first page kept the pendant from freeing, so each sync downloaded
+    the same growing recording again. Each new download should replace the last, not pile up."""
+    inc, arc, day = dirs
+    audio = b""
+    for n in range(1, 6):
+        audio += bytes([n]) * 100
+        rec(inc, 6055, 6055 + n * 100, audio=audio)
+        pf.file_incoming(inc, arc)
+    assert pf.copies(day, BASE) == [BASE]
+    assert (day / f"{BASE}.opus").read_bytes() == audio
+    assert len(list((arc / ".replaced").iterdir())) == 4
+
+
+def test_page_fields_read_from_large_metadata(tmp_path):
+    meta = {"page_first": 6055, "page_last": 19007, "page_count": 12953,
+            "bad_pages": list(range(6055, 6474)), "pages": [{"x": 1}] * 50000}
+    p = tmp_path / "m.json"
+    p.write_text(json.dumps(meta, indent=2))
+    assert pf._pages(p) == (6055, 19007, 12953)
+
+
+def test_tidy_keeps_the_copy_that_holds_the_others(dirs):
+    inc, arc, day = dirs
+    audio = b""
+    for n in range(0, 4):
+        audio += bytes([n + 1]) * 100
+        rec(day, None if n == 0 else 6055, 6055 + n * 100, audio=audio,
+            base=BASE if n == 0 else f"{BASE}_r{n}", transcript=f"copy {n}\n")
+    rec(day, 1, 2, audio=b"other" * 10, base=f"{BASE}_r9")   # a different recording: can't be proven
+    pf.tidy(arc, dry_run=True)
+    assert len(pf.copies(day, BASE)) == 5                    # dry run moves nothing
+    pf.tidy(arc)
+    assert pf.copies(day, BASE) == [BASE, f"{BASE}_r9"]
+    assert (day / f"{BASE}.opus").read_bytes() == audio      # the fullest copy, now under the plain name
+    assert (day / f"{BASE}.txt").read_text() == "copy 3\n"
+    assert len(list((arc / ".replaced").iterdir())) == 3
 
 
 def test_no_half_filed_leftovers(dirs):

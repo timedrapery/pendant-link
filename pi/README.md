@@ -182,12 +182,14 @@ Check it's scheduled: `systemctl --user list-timers` shows **pendant-sync.timer*
 - the saved files exist on disk and aren't empty;
 - the pendant reported its oldest stored page, and the download started exactly there and covers at least as many pages as it said it held (if the pendant doesn't report its oldest page, coverage can't be proven, so nothing is deleted and the next sync tries again);
 - it deletes only through the end of an unbroken run of pages: if a page went missing in the middle, everything from the gap on stays on the pendant;
-- it stops before any page the pendant flagged as unreadable, or that couldn't be parsed, so that page gets another try next time;
+- it stops before any page the pendant flagged as unreadable, or that couldn't be parsed, so that page gets another try next time. What the pendant sent for each such page is saved whole in a `.badpages.jsonl` file next to the recording. A page that fails in 3 separate syncs (`PENDANT_BAD_PAGE_TRIES` in `~/.config/pendant/env` changes the number) is taken to be lost on the pendant too, and freeing goes past it; otherwise one bad page at the front would stop freeing for good and the pendant would slowly fill up. A page that reads fine on a later try starts its count over;
 - nothing is deleted if any audio couldn't be decrypted (those chunks are saved whole in a `.enc.jsonl` file).
 
 The pendant's reply to the delete request is logged separately: "the pendant confirmed", or "no confirmation", in which case the next sync's reported oldest page shows whether it happened.
 
-**When pages are downloaded twice.** If pages weren't freed, the next sync downloads them again under the same name. Each recording's `.json` records which pages it holds, and the copies are compared before anything is filed: an identical copy is dropped; a copy that provably holds every page of the old one and at least as much audio replaces it, and the old one (with its transcript) is moved to `~/recordings/.replaced/`, never deleted; anything else keeps both, the new one with `_r1` added. Filing copies first and removes the incoming file last, so an interruption never leaves zero copies.
+**When pages are downloaded twice.** A recording is named after the time of its first page, so if pages weren't freed, the next sync downloads them again under the same name. The new download is compared with every copy already filed under that name before anything is filed: an identical copy is dropped; a filed copy the new one provably holds is moved to `~/recordings/.replaced/` (with its transcript), never deleted. "Provably" means either the filed copy's audio is, byte for byte, the start of the new audio, or both list their pages and the new one covers the old one's range with at least as many pages and as much audio. Copies that can't be proven stay, and the new one is filed beside them with `_r1`, `_r2`, ... added. Filing copies first and removes the incoming file last, so an interruption never leaves zero copies.
+
+If an earlier version left several `_r` copies of one recording, tidy them once: `python3 ~/.local/share/pendant/pendant_file.py --tidy ~/recordings --dry-run` shows what it would do, and without `--dry-run` it keeps the copy that provably holds all the others and moves the rest to `~/recordings/.replaced/`.
 
 What this doesn't cover: the files are written with ordinary writes, so a power cut in the few seconds between saving and freeing could in theory lose that one sync's audio; the WAV is decoded after freeing (the `.opus` is what's kept, and the WAV can always be rebuilt from it); and the backup runs nightly, so until then the Pi holds the only copy. If that gap matters to you, keep `--delete-after` off (edit `~/.local/share/pendant/pendant-sync`) and clear the pendant by hand now and then.
 
@@ -377,7 +379,9 @@ It prints the address to open (like `http://pendantpi.local:8765`, plus a number
 | --- | --- |
 | `~/recordings/YYYY-MM-DD/` | Each recording: `.opus` (compact audio), `.wav` (to listen to; deleted after 14 days, rebuildable), `.json` (times, stars, button presses), `.txt` (transcript), `.words.json` (transcript with exact times) |
 | `~/recordings/*.log` | Logs for sync, transcription and backup |
-| `~/recordings/pendant-health.json` | Last sync time, battery and storage, from the latest sync |
+| `~/recordings/pendant-health.json` | Last sync time, battery and storage, when pages were last freed and why not if they weren't |
+| `~/recordings/.unreadable-pages.json` | How many syncs each unreadable page has failed in |
+| `~/recordings/.replaced/` | Copies set aside because a newer download holds all of them (safe to delete once you're happy) |
 | `~/.config/pendant/env` | Settings: your pendant's address, options |
 | `~/.config/pendant/keys/` | Your encryption keys and backup passwords. Keep a copy elsewhere. |
 | `~/.local/share/pendant/` | The sync, backup and transcription scripts, and the transcription environment |
@@ -402,6 +406,8 @@ It prints the address to open (like `http://pendantpi.local:8765`, plus a number
 | Transcript times look off for recordings from before you updated | Redo the day: `pendant transcribe --redo-day <YYYY-MM-DD>`. |
 | The browse page won't open | Use the numbered address the installer printed (`hostname -I` shows it) if `.local` doesn't work on your phone. Check it's running: `systemctl --user status pendant-web --no-pager`. |
 | The light came back on | Run `pendant led 0` again. |
+| Many copies of one recording (`_r1`, `_r2`, ...) | Pages weren't being freed, so each sync downloaded them again. Check why with `grep -a "nothing will be deleted" ~/recordings/sync.log \| tail -3`, update (step 6), then tidy the copies (see "When pages are downloaded twice" in step 6). |
+| `The first page (...) was unreadable` | The pendant can't read that page. After 3 syncs (about 45 minutes) freeing goes past it, with what it sent saved in a `.badpages.jsonl` file. |
 | "Getting full" in `transcribe.log` | Lower `PENDANT_KEEP_WAV_DAYS` in `~/.config/pendant/env`, or move old day folders off the Pi (they're in the backup if you set it up). |
 
 ## Uninstall
@@ -418,7 +424,7 @@ That leaves your recordings (`~/recordings`) and keys (`~/.config/pendant`) alon
 
 ## What the pendant-cli patch changes
 
-`pendant-cli-fixes.patch` fixes how [pendant-cli](https://github.com/sdelcore/pendant-cli) reads the pendant and adds what this guide uses. Message layouts come from the Limitless Android app. It applies cleanly to upstream commit `1c71659`, which the installer checks out so the code you run is the code that was tested, and passes pendant-cli's tests (108, including 23 for the page-freeing logic and 17 for encryption and keys). The installer in step 6 applies it; it resets pendant-cli to its original files first (removing files an earlier version of the patch added), and only updates its own two lines in `~/.config/pendant/env`, so it's safe to rerun. Your own changes to pendant-cli's files, if any, would be lost.
+`pendant-cli-fixes.patch` fixes how [pendant-cli](https://github.com/sdelcore/pendant-cli) reads the pendant and adds what this guide uses. Message layouts come from the Limitless Android app. It applies cleanly to upstream commit `1c71659`, which the installer checks out so the code you run is the code that was tested, and passes pendant-cli's tests (118, including 33 for the page-freeing logic and 17 for encryption and keys). The installer in step 6 applies it; it resets pendant-cli to its original files first (removing files an earlier version of the patch added), and only updates its own two lines in `~/.config/pendant/env`, so it's safe to rerun. Your own changes to pendant-cli's files, if any, would be lost.
 
 **Reading the pendant correctly**
 - **Recording status** shows the real state: not recording, recording, or listening (armed to record when it hears speech), which pendant-cli used to print as `False`.
@@ -429,11 +435,11 @@ That leaves your recordings (`~/recordings`) and keys (`~/.config/pendant`) alon
 
 **Encryption, rebuilt to match the app.** pendant-cli assumed X25519 keys and a NaCl sealed box. The app (read from its JavaScript bundle) uses P-256 ECDH, HKDF-SHA256 with empty salt and info, and AES-128-GCM, and the encrypted-audio message is nonce (field 1), ciphertext (2), tag (3), packet offsets (4); pendant-cli had nonce and ciphertext swapped. `pendant crypto setkey`, `status` and `decrypt` now follow the app. The key derivation was checked against WebCrypto, the API the app uses.
 
-**Downloading safely.** `pendant download` stops once the pendant goes quiet (`--idle-timeout`) and can free pages afterwards (`--delete-after`), under the rules in step 6: files saved, run starts at the pendant's oldest page, unbroken, stops before unreadable or unparseable pages, nothing freed if anything couldn't be decrypted.
+**Downloading safely.** `pendant download` stops once the pendant goes quiet (`--idle-timeout`) and can free pages afterwards (`--delete-after`), under the rules in step 6: files saved, run starts at the pendant's oldest page, unbroken, stops before unreadable or unparseable pages (until one has failed in 3 separate downloads, with its bytes saved), nothing freed if anything couldn't be decrypted.
 
 **New commands:** `pendant sync`, `pendant backup`, `pendant transcribe` (which run the scripts in this folder), and `pendant led`.
 
-**Health file.** Each sync writes `~/recordings/pendant-health.json`: when it last synced, battery, storage. Nothing about what was said. With readable transcripts on, it goes to Drive too, so a morning note can mention a pendant that hasn't synced in a day or a low battery.
+**Health file.** Each sync writes `~/recordings/pendant-health.json`: when it last synced, battery, storage, when pages were last freed and, if the last sync couldn't free them, why. Nothing about what was said. With readable transcripts on, it goes to Drive too, so a morning note can mention a pendant that hasn't synced or freed space in a day, or a low battery.
 
 **Stars and clock times.** Button presses stored in the recording come through with their own clock time (`button_events` and `stars_ms` in each download's `.json`). Decoding saves a `timeline` that ties positions in the audio to the real time of day, since the pendant records only while it hears speech; transcripts use it.
 
