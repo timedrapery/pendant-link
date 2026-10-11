@@ -150,7 +150,7 @@ The pendant pairs with one device at a time, so it has to forget your phone firs
 
 This installs the pendant-cli patch, the `pendant sync` command and a timer that runs it every 30 minutes. It doesn't start the timer yet.
 
-**Battery.** Each sync connects to the pendant, downloads what's new, and hangs up, so its radio rests between syncs. To sync more or less often, put `PENDANT_SYNC_EVERY=60` (minutes: 15, 20, 30, 60, 120, 180, 240 or 360) in `~/.config/pendant/env` and run the install command below again. The pendant holds days of recordings, so syncing less often loses nothing; it just means they reach the Pi later. Two other things help its battery: listening mode (it records only when it hears speech) and the light off (`pendant led 0`, step 10).
+**Battery.** Each sync connects to the pendant, turns on its sending mode ("batch mode"), downloads what's new, turns sending mode off again (as the Limitless app does), and hangs up, so its radio rests between syncs. `pendant status` shows `Sync mode: off` when it's resting. To sync more or less often, put `PENDANT_SYNC_EVERY=60` (minutes: 15, 20, 30, 60, 120, 180, 240 or 360) in `~/.config/pendant/env` and run the install command below again. The pendant holds days of recordings, so syncing less often loses nothing; it just means they reach the Pi later. Two other things help its battery: listening mode (it records only when it hears speech) and the light off (`pendant led 0`, step 10).
 
 Still in the session where you ran `export PENDANT_ADDRESS=...` (or run it again):
 
@@ -437,7 +437,7 @@ What you need from outside the Pi: the `PENDANT KEYS` block from your password m
 | Pairing fails (`AuthenticationFailed`, or `Pairing Failed, reason 0x08` in `btmon`) | The pendant still remembers your phone. Close the Limitless app and do the full factory reset in step 5 (to purple, then blue). A long hold alone isn't a reset. |
 | `Protobuf not available` | Rebuild the message definitions: `cd ~/pendant-cli && protoc -I proto --python_out=proto proto/pendant.proto && cd ~` |
 | `A sync is already running; skipping` | The scheduled sync is busy. Wait a minute and try again. |
-| The pendant's battery drains fast | Check it isn't kept connected between syncs: `bluetoothctl info <address> \| grep Connected` should say `no` a few minutes after a sync. If it says `yes`, update (step 6) and run `bluetoothctl disconnect <address>`. Listening mode and the light off help too. |
+| The pendant's battery drains fast | `pendant status` should say `Sync mode: off`, and `bluetoothctl info <address> \| grep Connected` should say `no` a few minutes after a sync. If either doesn't, update (step 6); any `pendant` command then switches sending mode off and hangs up. Listening mode and the light off help too. |
 | `list-timers` shows `-` under NEXT | A run is in progress. Check again when it's done. |
 | `No such command 'sync'` (or `backup`, `led`, `transcribe`) | The patch isn't applied: run the step 6 install command again. It's safe to rerun any installer. |
 | `couldn't be decrypted` | Nothing is lost: those pages stay on the pendant, and the chunks are saved whole in a `.enc.jsonl` file. Make sure the Limitless app hasn't connected. Decrypt saved chunks later with `pendant crypto decrypt <file>.enc.jsonl`. |
@@ -468,7 +468,7 @@ That leaves your recordings (`~/recordings`) and keys (`~/.config/pendant`) alon
 
 ## What the pendant-cli patch changes
 
-`pendant-cli-fixes.patch` fixes how [pendant-cli](https://github.com/sdelcore/pendant-cli) reads the pendant and adds what this guide uses. Message layouts come from the Limitless Android app. It applies cleanly to upstream commit `1c71659`, which the installer checks out so the code you run is the code that was tested, and passes pendant-cli's tests (132, including 39 for the page-freeing logic and 23 for encryption and keys). The installer in step 6 applies it; it resets pendant-cli to its original files first (removing files an earlier version of the patch added), and only updates its own two lines in `~/.config/pendant/env`, so it's safe to rerun. Your own changes to pendant-cli's files, if any, would be lost.
+`pendant-cli-fixes.patch` fixes how [pendant-cli](https://github.com/sdelcore/pendant-cli) reads the pendant and adds what this guide uses. Message layouts come from the Limitless Android app. It applies cleanly to upstream commit `1c71659`, which the installer checks out so the code you run is the code that was tested, and passes pendant-cli's tests (134, including 39 for the page-freeing logic and 23 for encryption and keys). The installer in step 6 applies it; it resets pendant-cli to its original files first (removing files an earlier version of the patch added), and only updates its own two lines in `~/.config/pendant/env`, so it's safe to rerun. Your own changes to pendant-cli's files, if any, would be lost.
 
 **Reading the pendant correctly**
 - **Recording status** shows the real state: not recording, recording, or listening (armed to record when it hears speech), which pendant-cli used to print as `False`.

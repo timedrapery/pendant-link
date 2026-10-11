@@ -286,7 +286,7 @@ index fb98890..4c861ff 100644
  # Register command groups
  cli.add_command(bluetooth.bt)
 diff --git a/src/pendant/commands/audio.py b/src/pendant/commands/audio.py
-index cf0b2e6..b19cd76 100644
+index cf0b2e6..b56ad28 100644
 --- a/src/pendant/commands/audio.py
 +++ b/src/pendant/commands/audio.py
 @@ -1,6 +1,8 @@
@@ -543,7 +543,7 @@ index cf0b2e6..b19cd76 100644
          # Check if timestamps are real (synced) or just device uptime
          first_ts = client.page_timestamps[0].get("absolute_timestamp_ms", 0) if client.page_timestamps else 0
          timestamps_synced = first_ts > MIN_VALID_TIMESTAMP_MS
-@@ -102,25 +270,209 @@ def download(ctx, decode, output):
+@@ -102,25 +270,210 @@ def download(ctx, decode, output):
              "download_time_iso": datetime.now().isoformat(),
              "timestamps_synced": timestamps_synced,
              "total_pages": client.page_count,
@@ -722,6 +722,7 @@ index cf0b2e6..b19cd76 100644
 +        "charging": bool((client.last_battery or {}).get("charging")),
 +        "storage_used_percent": (client.last_status or {}).get("storage_used_percent"),
 +        "recording": (client.last_status or {}).get("recording_label"),
++        "sync_mode": (client.last_status or {}).get("sync_mode_label"),
 +    }
 +    if freeing is not None and client.page_count:
 +        if freeing.get("freed"):
@@ -1490,7 +1491,7 @@ index 5278f23..ca072c2 100644
          elif rtype == "battery_status":
              print(f"\n  Battery: {response.get('level', 0)}%")
 diff --git a/src/pendant/core/dbus_client.py b/src/pendant/core/dbus_client.py
-index a5867ef..b321677 100644
+index a5867ef..6a0e6f9 100644
 --- a/src/pendant/core/dbus_client.py
 +++ b/src/pendant/core/dbus_client.py
 @@ -1,10 +1,11 @@
@@ -1614,9 +1615,21 @@ index a5867ef..b321677 100644
      def check_connection(self) -> bool:
          """Check if device is connected."""
          try:
-@@ -212,12 +252,28 @@ class DBusClient:
+@@ -211,13 +251,41 @@ class DBusClient:
+         if self.loop:
              self.loop.quit()
  
++    def end_batch_mode(self):
++        """Switch the pendant's batch (sending) mode off, as the Limitless app does when it's
++        done fetching. Left on, the pendant keeps offering pages and sends them to whatever
++        connects next, which costs battery. Safe to send at any time."""
++        try:
++            if self.ctrl_char is not None:
++                self.send_command("download_flash_pages", batch=False, realtime=False)
++                time.sleep(0.3)  # let it go out before the link closes
++        except Exception:
++            pass
++
      def disconnect(self):
 -        """Clean up."""
 +        """Stop listening, then hang up the Bluetooth link.
@@ -1627,6 +1640,7 @@ index a5867ef..b321677 100644
 +        Set PENDANT_STAY_CONNECTED=yes to keep the link up (as pendant-cli used to).
 +        """
 +        import os
++        self.end_batch_mode()
          try:
              if self.data_char:
                  self.data_char.StopNotify()
@@ -1684,10 +1698,10 @@ index 0a797ea..16d9f6b 100644
              offset += frame_size
              frame_count += 1
 diff --git a/src/pendant/core/protocol.py b/src/pendant/core/protocol.py
-index c342f7e..c871278 100644
+index c342f7e..102e4db 100644
 --- a/src/pendant/core/protocol.py
 +++ b/src/pendant/core/protocol.py
-@@ -10,12 +10,46 @@ from .config import KEYS_DIR
+@@ -10,12 +10,54 @@ from .config import KEYS_DIR
  DEBUG_MODE = False
  
  
@@ -1696,12 +1710,20 @@ index c342f7e..c871278 100644
 +WIFI_STATE_LABELS = {0: "disconnected", 1: "connecting", 2: "connected", 3: "init error"}
 +
 +
++# DeviceStatus.sync_mode. Batch mode is a state the pendant stays in (the app switches it
++# on to fetch recordings and off again); while it's on, the pendant sends pages to anything
++# that connects.
++SYNC_MODE_LABELS = {0: "off", 1: "real-time", 2: "sending recordings (batch)"}
++
++
 +def _status_dict(status) -> dict:
 +    """Flatten a DeviceStatus message (field layout from the Limitless Android app)."""
 +    out = {"is_recording": False, "recording_state": None, "recording_label": "unknown",
 +           "storage_used_percent": 0.0, "storage_used_pages": None, "storage_total_pages": None,
 +           "wifi_connected": False, "wifi_label": "unknown",
-+           "led_brightness": status.led_brightness}
++           "led_brightness": status.led_brightness,
++           "sync_mode": status.sync_mode,
++           "sync_mode_label": SYNC_MODE_LABELS.get(status.sync_mode, f"mode {status.sync_mode}")}
 +    if status.HasField("recording_status"):
 +        state = status.recording_status.recording_state
 +        out["recording_state"] = state
@@ -1734,7 +1756,7 @@ index c342f7e..c871278 100644
  
      def create_ble_message(self, payload: bytes) -> bytes:
          """Wrap a payload in BLE message envelope."""
-@@ -82,6 +116,11 @@ class PendantProtocol:
+@@ -82,6 +124,11 @@ class PendantProtocol:
              dl.real_time_mode_enabled = kwargs.get("realtime", False)
              cmd.download_flash_pages.CopyFrom(dl)
  
@@ -1746,7 +1768,7 @@ index c342f7e..c871278 100644
          elif cmd_type == "set_current_time":
              sct = pb.SetCurrentTime()
              sct.timestamp_ms = kwargs.get("timestamp_ms", int(datetime.now().timestamp() * 1000))
-@@ -111,12 +150,14 @@ class PendantProtocol:
+@@ -111,12 +158,14 @@ class PendantProtocol:
  
          elif cmd_type == "set_led":
              led_msg = pb.SetLed()
@@ -1763,7 +1785,7 @@ index c342f7e..c871278 100644
              cmd.set_led_brightness.CopyFrom(brightness_msg)
  
          elif cmd_type == "set_vad_threshold":
-@@ -166,39 +207,22 @@ class PendantProtocol:
+@@ -166,39 +215,22 @@ class PendantProtocol:
              if content_type == "device_info":
                  info = msg.device_info
                  result.update({
@@ -1815,7 +1837,7 @@ index c342f7e..c871278 100644
  
              elif content_type == "storage_buffer":
                  buf = msg.storage_buffer
-@@ -232,14 +256,23 @@ class PendantProtocol:
+@@ -232,14 +264,23 @@ class PendantProtocol:
                  })
  
              elif content_type == "button_status":
@@ -1841,7 +1863,7 @@ index c342f7e..c871278 100644
  
              return result
  
-@@ -279,6 +312,17 @@ class PendantProtocol:
+@@ -279,6 +320,17 @@ class PendantProtocol:
                  print(f"\n    FlashPage: ts={page.absolute_timestamp_ms}, uptime={page.boot_uptime_ms}, chunks={len(page.chunks)}")
  
              for i, chunk in enumerate(page.chunks):
@@ -1859,7 +1881,7 @@ index c342f7e..c871278 100644
                  # Chunk is not a oneof - check if audio_data field is populated
                  has_audio = chunk.HasField('audio_data') if hasattr(chunk, 'HasField') else bool(chunk.audio_data.ByteSize())
  
-@@ -339,82 +383,133 @@ class PendantProtocol:
+@@ -339,82 +391,135 @@ class PendantProtocol:
                          if DEBUG_MODE:
                              print(f"        encrypted: ciphertext={len(enc.ciphertext)}B, nonce={len(enc.nonce)}B, tag={len(enc.tag)}B")
  
@@ -1959,6 +1981,8 @@ index c342f7e..c871278 100644
 +        lines.append("  Storage: unknown")
 +    if st.get("wifi_label") not in (None, "unknown"):
 +        lines.append(f"  Wi-Fi: {st['wifi_label']}")
++    if st.get("sync_mode_label"):
++        lines.append(f"  Sync mode: {st['sync_mode_label']}")
 +    return lines
 +
 +
@@ -2919,10 +2943,10 @@ index 0000000..6bdd2af
 +    assert c.sent == []
 diff --git a/tests/test_unreadable_pages.py b/tests/test_unreadable_pages.py
 new file mode 100644
-index 0000000..df1d17d
+index 0000000..eb82c2e
 --- /dev/null
 +++ b/tests/test_unreadable_pages.py
-@@ -0,0 +1,157 @@
+@@ -0,0 +1,201 @@
 +"""A page the pendant can't read must not stop freeing for good (Oct 10: pages 6055-6473)."""
 +import json
 +
@@ -3080,3 +3104,47 @@ index 0000000..df1d17d
 +    monkeypatch.setenv("PENDANT_STAY_CONNECTED", "yes")
 +    c.disconnect()
 +    assert calls == []
++
++
++def test_disconnect_switches_batch_mode_off_first(monkeypatch):
++    import sys, types
++    from pendant.core.dbus_client import DBusClient
++    from pendant.core.proto import pb
++    order = []
++
++    class Ctrl:
++        def WriteValue(self, value, opts):
++            env = pb.BLEMessageFromNativeToPendant()
++            env.ParseFromString(bytes(value))
++            cmd = pb.ServerCommandMsg()
++            cmd.ParseFromString(env.payload)
++            order.append(("write", cmd.WhichOneof("content"), cmd.download_flash_pages.batch_mode_enabled))
++
++    class Data:
++        def StopNotify(self):
++            order.append(("stop-notify",))
++
++    class FakeIface:
++        def __init__(self, obj, name):
++            pass
++        def Disconnect(self):
++            order.append(("hang-up",))
++
++    monkeypatch.setitem(sys.modules, "dbus", types.SimpleNamespace(Interface=FakeIface, Array=lambda v, signature=None: list(v)))
++    monkeypatch.setattr("time.sleep", lambda s: None)
++    c = DBusClient("AA:BB:CC:DD:EE:FF")
++    c.ctrl_char, c.data_char = Ctrl(), Data()
++    c.bus = types.SimpleNamespace(get_object=lambda svc, path: None)
++    c.disconnect()
++    assert order == [("write", "download_flash_pages", False), ("stop-notify",), ("hang-up",)]
++
++
++def test_status_shows_sync_mode():
++    from pendant.core.protocol import _status_dict, format_status_lines
++    from pendant.core.proto import pb
++    st = pb.DeviceStatus()
++    st.sync_mode = 2
++    lines = format_status_lines(_status_dict(st))
++    assert "  Sync mode: sending recordings (batch)" in lines
++    st.sync_mode = 0
++    assert "  Sync mode: off" in format_status_lines(_status_dict(st))
