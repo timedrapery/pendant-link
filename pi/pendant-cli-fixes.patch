@@ -307,7 +307,7 @@ index fb98890..4c861ff 100644
  # Register command groups
  cli.add_command(bluetooth.bt)
 diff --git a/src/pendant/commands/audio.py b/src/pendant/commands/audio.py
-index cf0b2e6..e541870 100644
+index cf0b2e6..2d12478 100644
 --- a/src/pendant/commands/audio.py
 +++ b/src/pendant/commands/audio.py
 @@ -1,6 +1,8 @@
@@ -360,7 +360,7 @@ index cf0b2e6..e541870 100644
  
      def start_download():
          click.echo("\nDownloading audio (this may take a while)...")
-@@ -42,8 +52,253 @@ def download(ctx, decode, output):
+@@ -42,8 +52,266 @@ def download(ctx, decode, output):
          return False
  
      GLib.timeout_add_seconds(2, start_download)
@@ -395,7 +395,7 @@ index cf0b2e6..e541870 100644
 +    opus = freeing.get("opus_file")
 +    if opus:
 +        if decode:
-+            decode_saved(Path(opus), client.page_timestamps)
++            decode_saved(Path(opus), freeing.get("page_timestamps", client.page_timestamps))
 +        else:
 +            click.echo(f"  Decode: pendant decode {opus}")
 +
@@ -441,7 +441,7 @@ index cf0b2e6..e541870 100644
 +    battery drain). Returns (finished, oldest page reported, seconds waited).
 +    """
 +    wait = _free_wait() if wait is None else wait
-+    waited, oldest = 0, None
++    waited, oldest, reconnects = 0, None, 0
 +    while waited <= wait:
 +        st = getattr(client, "last_status", None) or {}
 +        oldest = st.get("oldest_flash_page")
@@ -450,8 +450,21 @@ index cf0b2e6..e541870 100644
 +            return True, oldest, waited
 +        if waited >= wait:
 +            break
-+        client.send_command("get_device_status")
-+        client.run_with_timeout(poll)
++        try:
++            client.send_command("get_device_status")
++            client.run_with_timeout(poll)
++        except Exception as e:
++            # The pendant can drop the link while it erases (Oct 12: "Not connected" right
++            # after the delete request). Reconnect and keep checking, a few times.
++            reconnects += 1
++            if reconnects > 3 or not hasattr(client, "connect"):
++                raise
++            click.echo(f"  The link dropped while the pendant erases ({e}); reconnecting...")
++            time.sleep(2)
++            try:
++                client.connect()
++            except Exception:
++                pass
 +        waited += poll
 +    return False, oldest, waited
 +
@@ -616,7 +629,7 @@ index cf0b2e6..e541870 100644
  
      # Save audio
      click.echo(f"\n\nDownload complete!")
-@@ -72,26 +327,49 @@ def download(ctx, decode, output):
+@@ -72,26 +340,50 @@ def download(ctx, decode, output):
          timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
  
      opus_fname = None
@@ -628,6 +641,7 @@ index cf0b2e6..e541870 100644
 -        opus_fname.write_bytes(client.opus_data)
 +        _save(opus_fname, bytes(client.opus_data), expected)
 +        freeing["opus_file"] = str(opus_fname)  # so it's decoded even if freeing ends early
++        freeing["page_timestamps"] = list(client.page_timestamps or [])  # exactly what was saved
 +        written.append(opus_fname)
          click.echo(f"\nSaved: {opus_fname}")
  
@@ -674,7 +688,7 @@ index cf0b2e6..e541870 100644
          # Check if timestamps are real (synced) or just device uptime
          first_ts = client.page_timestamps[0].get("absolute_timestamp_ms", 0) if client.page_timestamps else 0
          timestamps_synced = first_ts > MIN_VALID_TIMESTAMP_MS
-@@ -102,25 +380,247 @@ def download(ctx, decode, output):
+@@ -102,25 +394,251 @@ def download(ctx, decode, output):
              "download_time_iso": datetime.now().isoformat(),
              "timestamps_synced": timestamps_synced,
              "total_pages": client.page_count,
@@ -771,6 +785,10 @@ index cf0b2e6..e541870 100644
 +                raise click.ClickException("The saved files don't match what was downloaded, so nothing will be "
 +                                           "deleted from the pendant: " + "; ".join(problems))
 +            click.echo(f"  Checked {len(expected)} saved file(s) on disk: flushed, read back, and identical to the download.")
++            # Stop the pendant sending before asking it to free: nothing more is needed this
++            # session, and pages streamed meanwhile would only be downloaded again next time.
++            if hasattr(client, "end_batch_mode"):
++                client.end_batch_mode()
 +            click.echo(f"Asking the pendant to free pages through index {through}...")
 +            ack = {"reply": None, "id": None}
 +            prior = getattr(client, "on_response", None)
@@ -806,7 +824,7 @@ index cf0b2e6..e541870 100644
 +                    done, now_oldest, waited = wait_until_erased(client, through)
 +                except Exception as e:
 +                    done, now_oldest, waited = False, None, 0
-+                    click.echo(f"  (lost the connection while waiting: {e})")
++                    click.echo(f"  Lost the connection while waiting and couldn't reconnect: {e}")
 +                if done:
 +                    click.echo(f"Freed: the pendant's oldest page is now {now_oldest} (erasing took about {waited} s).")
 +                    freeing["freed"] = True
@@ -1716,7 +1734,7 @@ index 5278f23..ca072c2 100644
          elif rtype == "battery_status":
              print(f"\n  Battery: {response.get('level', 0)}%")
 diff --git a/src/pendant/core/dbus_client.py b/src/pendant/core/dbus_client.py
-index a5867ef..f98698b 100644
+index a5867ef..c803d7d 100644
 --- a/src/pendant/core/dbus_client.py
 +++ b/src/pendant/core/dbus_client.py
 @@ -1,10 +1,11 @@
@@ -1843,7 +1861,30 @@ index a5867ef..f98698b 100644
      def check_connection(self) -> bool:
          """Check if device is connected."""
          try:
-@@ -211,13 +254,41 @@ class DBusClient:
+@@ -158,13 +201,15 @@ class DBusClient:
+             'org.bluez.GattCharacteristic1'
+         )
+ 
+-        # Subscribe to notifications
+-        self.bus.add_signal_receiver(
+-            self._on_properties_changed,
+-            signal_name='PropertiesChanged',
+-            dbus_interface='org.freedesktop.DBus.Properties',
+-            path_keyword='path'
+-        )
++        # Subscribe to notifications (once: connect() may run again after a dropped link)
++        if not getattr(self, "_listening", False):
++            self.bus.add_signal_receiver(
++                self._on_properties_changed,
++                signal_name='PropertiesChanged',
++                dbus_interface='org.freedesktop.DBus.Properties',
++                path_keyword='path'
++            )
++            self._listening = True
+ 
+         # Enable notifications
+         try:
+@@ -211,13 +256,41 @@ class DBusClient:
          if self.loop:
              self.loop.quit()
  
@@ -3516,10 +3557,10 @@ index 0000000..5c07b1a
 +    assert json.loads((tmp_path / "pendant-health.json").read_text())["sync_mode_on_arrival"] == "sending recordings (batch)"
 diff --git a/tests/test_wait_for_erase.py b/tests/test_wait_for_erase.py
 new file mode 100644
-index 0000000..6d328eb
+index 0000000..8fefe10
 --- /dev/null
 +++ b/tests/test_wait_for_erase.py
-@@ -0,0 +1,89 @@
+@@ -0,0 +1,139 @@
 +"""After asking to free, stay connected until the pendant has really erased (Oct 11-12)."""
 +from pendant.commands.audio import _save_and_free, wait_until_erased
 +from test_sync_safety import FakeClient
@@ -3609,3 +3650,53 @@ index 0000000..6d328eb
 +    if freeing.get("opus_file"):
 +        audio.decode_saved(freeing["opus_file"], [])
 +    assert order == ["disconnect", "decode"]
++
++
++def test_reconnects_when_the_link_drops_while_erasing(monkeypatch):
++    monkeypatch.setattr("time.sleep", lambda s: None)
++    class Client:
++        def __init__(self):
++            self.last_status = {"oldest_flash_page": 100}
++            self.connected, self.connects, self.calls = True, 0, 0
++        def send_command(self, name, **kw):
++            self.calls += 1
++            if self.calls == 1:
++                self.connected = False
++                raise RuntimeError("org.bluez.Error.Failed: Not connected")
++            self.last_status = {"oldest_flash_page": 301}
++        def run_with_timeout(self, s):
++            pass
++        def connect(self):
++            self.connects += 1
++            self.connected = True
++            return True
++    c = Client()
++    done, oldest, waited = wait_until_erased(c, 300, wait=60)
++    assert done and oldest == 301 and c.connects == 1
++
++
++def test_gives_up_after_repeated_drops(monkeypatch):
++    import pytest
++    monkeypatch.setattr("time.sleep", lambda s: None)
++    class Client:
++        last_status = {"oldest_flash_page": 100}
++        def send_command(self, *a, **k): raise RuntimeError("Not connected")
++        def run_with_timeout(self, s): pass
++        def connect(self): return False
++    with pytest.raises(RuntimeError):
++        wait_until_erased(Client(), 300, wait=600)
++
++
++def test_batch_mode_off_before_asking_to_free(tmp_path):
++    c = FakeClient([1, 2, 3])
++    order = []
++    c.end_batch_mode = lambda: order.append("batch off")
++    real = c.send_command
++    def send(name, **kw):
++        if name == "delete_flash_page":
++            order.append("delete")
++        return real(name, **kw)
++    c.send_command = send
++    freeing = _save_and_free(c, decode=None, output_dir=tmp_path, delete_after=True)
++    assert order == ["batch off", "delete"]
++    assert len(freeing["page_timestamps"]) == 3
