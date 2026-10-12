@@ -91,7 +91,8 @@ set_setting PENDANT_ADDRESS "$ADDRESS"
 set_setting PENDANT_BIN "$PENDANT_BIN"
 set_setting PENDANT_SYNC_EVERY "$EVERY"
 systemctl --user daemon-reload
-systemctl --user is-enabled -q pendant-sync.timer 2>/dev/null && systemctl --user restart pendant-sync.timer
+# Pick up a new schedule, but only if the timer is running: a timer you've stopped stays stopped.
+systemctl --user is-active -q pendant-sync.timer 2>/dev/null && systemctl --user restart pendant-sync.timer
 say "Syncing every $EVERY minutes"
 
 say "Installed. Next: run 'pendant sync' once by hand and check ~/recordings."
