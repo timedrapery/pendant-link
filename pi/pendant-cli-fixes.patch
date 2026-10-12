@@ -307,7 +307,7 @@ index fb98890..4c861ff 100644
  # Register command groups
  cli.add_command(bluetooth.bt)
 diff --git a/src/pendant/commands/audio.py b/src/pendant/commands/audio.py
-index cf0b2e6..a8163b9 100644
+index cf0b2e6..e541870 100644
 --- a/src/pendant/commands/audio.py
 +++ b/src/pendant/commands/audio.py
 @@ -1,6 +1,8 @@
@@ -360,7 +360,7 @@ index cf0b2e6..a8163b9 100644
  
      def start_download():
          click.echo("\nDownloading audio (this may take a while)...")
-@@ -42,8 +52,243 @@ def download(ctx, decode, output):
+@@ -42,8 +52,253 @@ def download(ctx, decode, output):
          return False
  
      GLib.timeout_add_seconds(2, start_download)
@@ -382,12 +382,22 @@ index cf0b2e6..a8163b9 100644
 +        return True
 +
 +    GLib.timeout_add(500, check_idle)
++    freeing = {}
 +    try:
 +        client.run_with_timeout(max_time)
-+        freeing = _save_and_free(client, decode, output_dir, delete_after)
++        # decode=None: convert to WAV only after hanging up (below). Decoding a large download
++        # takes minutes and doesn't need the pendant; staying connected meanwhile, in batch
++        # mode, would keep its radio busy for nothing.
++        freeing = _save_and_free(client, None, output_dir, delete_after)
 +        write_health(client, output_dir, address, freeing)
 +    finally:
 +        client.disconnect()
++    opus = freeing.get("opus_file")
++    if opus:
++        if decode:
++            decode_saved(Path(opus), client.page_timestamps)
++        else:
++            click.echo(f"  Decode: pendant decode {opus}")
 +
 +
 +# A page the pendant can't read (it says so itself, or it arrives garbled) stops freeing at that
@@ -606,7 +616,7 @@ index cf0b2e6..a8163b9 100644
  
      # Save audio
      click.echo(f"\n\nDownload complete!")
-@@ -72,26 +317,48 @@ def download(ctx, decode, output):
+@@ -72,26 +327,49 @@ def download(ctx, decode, output):
          timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
  
      opus_fname = None
@@ -617,6 +627,7 @@ index cf0b2e6..a8163b9 100644
          opus_fname = output_dir / f"pendant_{timestamp}.opus"
 -        opus_fname.write_bytes(client.opus_data)
 +        _save(opus_fname, bytes(client.opus_data), expected)
++        freeing["opus_file"] = str(opus_fname)  # so it's decoded even if freeing ends early
 +        written.append(opus_fname)
          click.echo(f"\nSaved: {opus_fname}")
  
@@ -663,7 +674,7 @@ index cf0b2e6..a8163b9 100644
          # Check if timestamps are real (synced) or just device uptime
          first_ts = client.page_timestamps[0].get("absolute_timestamp_ms", 0) if client.page_timestamps else 0
          timestamps_synced = first_ts > MIN_VALID_TIMESTAMP_MS
-@@ -102,25 +369,240 @@ def download(ctx, decode, output):
+@@ -102,25 +380,247 @@ def download(ctx, decode, output):
              "download_time_iso": datetime.now().isoformat(),
              "timestamps_synced": timestamps_synced,
              "total_pages": client.page_count,
@@ -687,6 +698,7 @@ index cf0b2e6..a8163b9 100644
 +        _save(json_fname, json.dumps(metadata, indent=2).encode(), expected)
          click.echo(f"Saved metadata: {json_fname}")
  
+-    # Auto-decode opus to WAV if requested
 +    # Free the pages we just saved -- only through the end of the unbroken run we received.
 +    if client.page_count:
 +        lo, hi = min(client.page_indices), max(client.page_indices)
@@ -804,22 +816,37 @@ index cf0b2e6..a8163b9 100644
 +                    freeing["freed"] = True
 +                    freeing["reason"] = "the pendant was still erasing when the sync ended"
 +
-     # Auto-decode opus to WAV if requested
++    # Auto-decode opus to WAV if requested (None: the caller decodes, after disconnecting)
      if decode and opus_fname and opus_fname.exists():
-         wav_fname = opus_fname.with_suffix('.wav')
-         click.echo(f"\nDecoding to WAV...")
-         try:
+-        wav_fname = opus_fname.with_suffix('.wav')
+-        click.echo(f"\nDecoding to WAV...")
+-        try:
 -            if decode_opus_file(str(opus_fname), str(wav_fname)):
-+            frame_map = []
-+            if decode_opus_file(str(opus_fname), str(wav_fname), frame_map=frame_map):
-                 click.echo(f"Decoded: {wav_fname}")
-+                _add_timeline(opus_fname.with_suffix(".json"), client.page_timestamps, frame_map)
-         except Exception as e:
-             click.echo(f"Decode failed: {e}")
-             click.echo(f"  Manual: pendant decode {opus_fname}")
-     elif opus_fname and not decode:
+-                click.echo(f"Decoded: {wav_fname}")
+-        except Exception as e:
+-            click.echo(f"Decode failed: {e}")
+-            click.echo(f"  Manual: pendant decode {opus_fname}")
+-    elif opus_fname and not decode:
++        decode_saved(opus_fname, client.page_timestamps)
++    elif opus_fname and decode is False:
          click.echo(f"  Decode: pendant decode {opus_fname}")
 +    return freeing
++
++
++def decode_saved(opus_fname, page_timestamps):
++    """Decode a saved .opus to .wav next to it, and add the timeline to its .json."""
++    if not opus_fname.exists():
++        return
++    wav_fname = opus_fname.with_suffix('.wav')
++    click.echo(f"\nDecoding to WAV...")
++    try:
++        frame_map = []
++        if decode_opus_file(str(opus_fname), str(wav_fname), frame_map=frame_map):
++            click.echo(f"Decoded: {wav_fname}")
++            _add_timeline(opus_fname.with_suffix(".json"), page_timestamps, frame_map)
++    except Exception as e:
++        click.echo(f"Decode failed: {e}")
++        click.echo(f"  Manual: pendant decode {opus_fname}")
 +
 +
 +def _key_id(client):
@@ -3489,10 +3516,10 @@ index 0000000..5c07b1a
 +    assert json.loads((tmp_path / "pendant-health.json").read_text())["sync_mode_on_arrival"] == "sending recordings (batch)"
 diff --git a/tests/test_wait_for_erase.py b/tests/test_wait_for_erase.py
 new file mode 100644
-index 0000000..4373094
+index 0000000..6d328eb
 --- /dev/null
 +++ b/tests/test_wait_for_erase.py
-@@ -0,0 +1,61 @@
+@@ -0,0 +1,89 @@
 +"""After asking to free, stay connected until the pendant has really erased (Oct 11-12)."""
 +from pendant.commands.audio import _save_and_free, wait_until_erased
 +from test_sync_safety import FakeClient
@@ -3554,3 +3581,31 @@ index 0000000..4373094
 +    assert "connection dropped" in capsys.readouterr().out
 +    assert freeing["reason"] == "the connection dropped while freeing"
 +    assert list(tmp_path.glob("*.opus"))      # the recording is saved
++
++
++def test_opus_file_reported_even_when_freeing_ends_early(tmp_path):
++    c = FakeClient([1, 2, 3])
++    def boom(name, **kw):
++        if name == "delete_flash_page":
++            raise RuntimeError("Not connected")
++    c.send_command = boom
++    freeing = _save_and_free(c, decode=None, output_dir=tmp_path, delete_after=True)
++    assert freeing["opus_file"] and freeing["opus_file"].endswith(".opus")
++    assert not list(tmp_path.glob("*.wav"))          # decode=None: left for after hanging up
++
++
++def test_download_decodes_after_disconnecting(tmp_path, monkeypatch):
++    """The order that matters for the battery: free, hang up, then decode."""
++    from pendant.commands import audio
++    order = []
++    monkeypatch.setattr(audio, "decode_saved", lambda opus, pages: order.append("decode"))
++    c = FakeClient([1, 2, 3])
++    c.disconnect = lambda: order.append("disconnect")
++    freeing = {}
++    try:
++        freeing = audio._save_and_free(c, None, tmp_path, True)
++    finally:
++        c.disconnect()
++    if freeing.get("opus_file"):
++        audio.decode_saved(freeing["opus_file"], [])
++    assert order == ["disconnect", "decode"]
