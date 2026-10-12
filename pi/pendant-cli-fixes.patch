@@ -307,7 +307,7 @@ index fb98890..4c861ff 100644
  # Register command groups
  cli.add_command(bluetooth.bt)
 diff --git a/src/pendant/commands/audio.py b/src/pendant/commands/audio.py
-index cf0b2e6..92d9910 100644
+index cf0b2e6..a8163b9 100644
 --- a/src/pendant/commands/audio.py
 +++ b/src/pendant/commands/audio.py
 @@ -1,6 +1,8 @@
@@ -360,7 +360,7 @@ index cf0b2e6..92d9910 100644
  
      def start_download():
          click.echo("\nDownloading audio (this may take a while)...")
-@@ -42,8 +52,210 @@ def download(ctx, decode, output):
+@@ -42,8 +52,243 @@ def download(ctx, decode, output):
          return False
  
      GLib.timeout_add_seconds(2, start_download)
@@ -411,6 +411,39 @@ index cf0b2e6..92d9910 100644
 +
 +
 +FREED_FILE = ".pendant-freed.json"
++FREE_WAIT_SECONDS = 180  # how long to stay connected while the pendant erases freed pages
++FREE_POLL_SECONDS = 5
++
++
++def _free_wait():
++    try:
++        return max(0, int(os.environ.get("PENDANT_FREE_WAIT", FREE_WAIT_SECONDS)))
++    except ValueError:
++        return FREE_WAIT_SECONDS
++
++
++def wait_until_erased(client, through, wait=None, poll=FREE_POLL_SECONDS):
++    """Stay connected until the pendant reports its oldest page past `through`.
++
++    Erasing thousands of pages takes the pendant a while. Oct 11-12: the Pi asked to free,
++    waited 5 seconds for a reply that never came, then hung up; the pendant erased the pages
++    but never moved its oldest page, so every sync downloaded them again (11-15 MB each, the
++    battery drain). Returns (finished, oldest page reported, seconds waited).
++    """
++    wait = _free_wait() if wait is None else wait
++    waited, oldest = 0, None
++    while waited <= wait:
++        st = getattr(client, "last_status", None) or {}
++        oldest = st.get("oldest_flash_page")
++        used = st.get("storage_used_pages")
++        if (oldest is not None and oldest > through) or used == 0:
++            return True, oldest, waited
++        if waited >= wait:
++            break
++        client.send_command("get_device_status")
++        client.run_with_timeout(poll)
++        waited += poll
++    return False, oldest, waited
 +
 +
 +def load_freed(root):
@@ -573,7 +606,7 @@ index cf0b2e6..92d9910 100644
  
      # Save audio
      click.echo(f"\n\nDownload complete!")
-@@ -72,26 +284,48 @@ def download(ctx, decode, output):
+@@ -72,26 +317,48 @@ def download(ctx, decode, output):
          timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
  
      opus_fname = None
@@ -630,7 +663,7 @@ index cf0b2e6..92d9910 100644
          # Check if timestamps are real (synced) or just device uptime
          first_ts = client.page_timestamps[0].get("absolute_timestamp_ms", 0) if client.page_timestamps else 0
          timestamps_synced = first_ts > MIN_VALID_TIMESTAMP_MS
-@@ -102,25 +336,224 @@ def download(ctx, decode, output):
+@@ -102,25 +369,240 @@ def download(ctx, decode, output):
              "download_time_iso": datetime.now().isoformat(),
              "timestamps_synced": timestamps_synced,
              "total_pages": client.page_count,
@@ -738,22 +771,38 @@ index cf0b2e6..92d9910 100644
 +                    client.stop()
 +
 +            client.on_response = on_response
-+            client.send_command("delete_flash_page", index=through)
-+            ack["id"] = getattr(getattr(client, "protocol", None), "message_index", None)
-+            client.run_with_timeout(5)
++            try:
++                client.send_command("delete_flash_page", index=through)
++                ack["id"] = getattr(getattr(client, "protocol", None), "message_index", None)
++                client.run_with_timeout(5)
++            except Exception as e:  # the link dropped; the files are saved, the next sync retries
++                client.on_response = prior
++                click.echo(f"The connection dropped while asking the pendant to free pages ({e}). "
++                           "Everything is saved here; the next sync tries again.")
++                freeing["reason"] = "the connection dropped while freeing"
++                return freeing
 +            client.on_response = prior
 +            reply = ack["reply"]
-+            if reply is None:
-+                click.echo("Freed (no confirmation from the pendant; the next sync's oldest page will show it).")
-+                freeing["freed"] = True
-+                save_freed(root, through, oldest)
-+            elif reply.get("response_success"):
-+                click.echo("Freed (the pendant confirmed).")
-+                freeing["freed"] = True
-+                save_freed(root, through, oldest)
-+            else:
++            if reply is not None and not reply.get("response_success"):
 +                click.echo(f"The pendant refused to free pages: {reply.get('response_error')}. Everything stays on it.")
 +                freeing["reason"] = f"the pendant refused: {reply.get('response_error')}"
++            else:
++                save_freed(root, through, oldest)
++                click.echo("Asked; the pendant " + ("confirmed" if reply is not None else "didn't reply")
++                           + ". Staying connected while it erases...")
++                try:
++                    done, now_oldest, waited = wait_until_erased(client, through)
++                except Exception as e:
++                    done, now_oldest, waited = False, None, 0
++                    click.echo(f"  (lost the connection while waiting: {e})")
++                if done:
++                    click.echo(f"Freed: the pendant's oldest page is now {now_oldest} (erasing took about {waited} s).")
++                    freeing["freed"] = True
++                else:
++                    click.echo(f"The pendant hadn't finished erasing after {waited} s (oldest page still "
++                               f"{now_oldest}). Everything is saved here; the next sync recognises the erased pages.")
++                    freeing["freed"] = True
++                    freeing["reason"] = "the pendant was still erasing when the sync ended"
 +
      # Auto-decode opus to WAV if requested
      if decode and opus_fname and opus_fname.exists():
@@ -2915,10 +2964,10 @@ index 0000000..aeea62b
 +    assert seen["argv"] == [str(script)]
 diff --git a/tests/test_sync_safety.py b/tests/test_sync_safety.py
 new file mode 100644
-index 0000000..6bdd2af
+index 0000000..577d5df
 --- /dev/null
 +++ b/tests/test_sync_safety.py
-@@ -0,0 +1,214 @@
+@@ -0,0 +1,226 @@
 +"""Safety tests for freeing pages on the pendant after a download."""
 +import click
 +import pytest
@@ -2977,7 +3026,19 @@ index 0000000..6bdd2af
 +        self.sent = []
 +
 +    def send_command(self, name, **kw):
++        # Acts like a pendant that erases what it's asked to: after a delete, its status
++        # reports the next page as the oldest. Status requests aren't recorded in `sent`.
++        if name == "get_device_status":
++            if self.erases and self.erased_through is not None:
++                self.last_status = dict(self.last_status or {}, oldest_flash_page=self.erased_through + 1)
++            return
 +        self.sent.append((name, kw))
++        if name == "delete_flash_page":
++            self.erased_through = kw["index"]
++
++    erases = True
++    erased_through = None
++    last_battery = None
 +
 +    def run_with_timeout(self, seconds):
 +        pass
@@ -3426,3 +3487,70 @@ index 0000000..5c07b1a
 +    write_health(c, inc, None, freeing)
 +    assert "when this sync arrived: sending recordings (batch)" in capsys.readouterr().out
 +    assert json.loads((tmp_path / "pendant-health.json").read_text())["sync_mode_on_arrival"] == "sending recordings (batch)"
+diff --git a/tests/test_wait_for_erase.py b/tests/test_wait_for_erase.py
+new file mode 100644
+index 0000000..4373094
+--- /dev/null
++++ b/tests/test_wait_for_erase.py
+@@ -0,0 +1,61 @@
++"""After asking to free, stay connected until the pendant has really erased (Oct 11-12)."""
++from pendant.commands.audio import _save_and_free, wait_until_erased
++from test_sync_safety import FakeClient
++
++
++def test_waits_for_the_oldest_page_to_move(tmp_path, capsys):
++    c = FakeClient(range(28210, 31000))
++    _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=True)
++    out = capsys.readouterr().out
++    assert c.sent == [("delete_flash_page", {"index": 30999})]
++    assert "Freed: the pendant's oldest page is now 31000" in out
++
++
++def test_pendant_that_never_finishes(tmp_path, capsys, monkeypatch):
++    monkeypatch.setenv("PENDANT_FREE_WAIT", "20")
++    c = FakeClient(range(28210, 31000))
++    c.erases = False
++    polls = []
++    real = c.run_with_timeout
++    c.run_with_timeout = lambda s: polls.append(s)
++    freeing = _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=True)
++    out = capsys.readouterr().out
++    assert "hadn't finished erasing after 20 s" in out
++    assert freeing["reason"] == "the pendant was still erasing when the sync ended"
++    assert polls.count(5) == 4 + 1            # the 5 s reply wait, then four status checks
++
++
++def test_wait_returns_as_soon_as_erased():
++    class Client:
++        def __init__(self):
++            self.last_status = {"oldest_flash_page": 100}
++            self.calls = 0
++        def send_command(self, name, **kw):
++            self.calls += 1
++            if self.calls == 2:
++                self.last_status = {"oldest_flash_page": 251}
++        def run_with_timeout(self, s):
++            pass
++    c = Client()
++    done, oldest, waited = wait_until_erased(c, 250, wait=60)
++    assert done and oldest == 251 and waited == 10
++
++
++def test_empty_pendant_counts_as_erased():
++    class Client:
++        last_status = {"oldest_flash_page": 0, "storage_used_pages": 0}
++        def send_command(self, *a, **k): pass
++        def run_with_timeout(self, s): pass
++    assert wait_until_erased(Client(), 500, wait=30)[0]
++
++
++def test_dropped_connection_while_freeing_is_reported_not_raised(tmp_path, capsys):
++    c = FakeClient([1, 2, 3])
++    def boom(name, **kw):
++        if name == "delete_flash_page":
++            raise RuntimeError("org.bluez.Error.Failed: Not connected")
++    c.send_command = boom
++    freeing = _save_and_free(c, decode=False, output_dir=tmp_path, delete_after=True)
++    assert "connection dropped" in capsys.readouterr().out
++    assert freeing["reason"] == "the connection dropped while freeing"
++    assert list(tmp_path.glob("*.opus"))      # the recording is saved
