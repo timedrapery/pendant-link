@@ -28,9 +28,18 @@ out spelled right. The default is a short list of Pali Dhamma terms. Put your ow
 an empty file, or PENDANT_VOCABULARY=off, turns it off. It applies to new transcripts; redo
 older ones with --redo-day.
 
+Your voice and consent mode (pendant_voice.py has the details): once you've run
+    pendant transcribe --learn-voice 2026-10-12 09:10 09:14   (a stretch where only you talk)
+each line is labelled as you ("Me:") or someone else, and what others say is left out
+("(someone else spoke)") unless they agreed:
+    pendant transcribe --allow 2026-10-12 14:00 15:30 dinner with the family
+    pendant transcribe --voice-check FILE    how each line would be labelled, with scores
+    pendant transcribe --forget-voice
+
 Settings (environment, or ~/.config/pendant/env): PENDANT_WHISPER_MODEL (default base.en),
 PENDANT_WHISPER_THREADS (4), PENDANT_WHISPER_BEAM (1), PENDANT_KEEP_WAV_DAYS (14),
-PENDANT_ARCHIVE (~/recordings), PENDANT_VOCABULARY (on).
+PENDANT_ARCHIVE (~/recordings), PENDANT_VOCABULARY (on), PENDANT_CONSENT_MODE (on),
+PENDANT_VOICE (on), PENDANT_VOICE_MATCH (0.42), PENDANT_MY_NAME (Me).
 """
 
 import argparse
@@ -43,6 +52,9 @@ import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import pendant_voice as pv  # noqa: E402  (installed next to this script)
 
 ARCHIVE = Path(os.environ.get("PENDANT_ARCHIVE", Path.home() / "recordings"))
 MODEL = os.environ.get("PENDANT_WHISPER_MODEL", "base.en")
@@ -305,8 +317,12 @@ def _write_atomic(path: Path, text: str):
     tmp.replace(path)
 
 
-def transcribe_one(model, wav: Path):
-    """Transcribe one WAV. Returns (seconds of audio, number of speech lines)."""
+def transcribe_one(model, wav: Path, voice=None, allowed=(), consent=True):
+    """Transcribe one WAV. Returns (seconds of audio, number of speech lines).
+
+    With `voice` (your voice learned), each line is labelled as you or someone else; in
+    consent mode what others say is left out unless that time is in `allowed`.
+    """
     meta = load_meta(wav)
     start = recording_start(wav, meta)
     stars = stars_for(wav)
@@ -316,6 +332,8 @@ def transcribe_one(model, wav: Path):
     vocab = vocabulary()
     extra = _vocab_args(model, vocab)
     lines, words = [], []
+    me_name = setting("PENDANT_MY_NAME", "Me")
+    withheld, withheld_run = 0, False
     for offset, audio in wav_windows(wav, WINDOW_SECONDS, CUT_SEARCH_SECONDS):
         segments, _ = model.transcribe(
             audio, language="en", beam_size=BEAM, vad_filter=True,
@@ -329,12 +347,34 @@ def transcribe_one(model, wav: Path):
             at = clock(t0)
             stamp = at.strftime("%H:%M:%S") if at else _clock(t0)
             starred = _starred(at, stars)
-            lines.append(f"{STAR + ' ' if starred else ''}[{stamp}] {text}")
-            words.append({
+            mark = STAR + " " if starred else ""
+            entry = {
                 "start": round(t0, 2), "end": round(t1, 2),
                 "at": at.isoformat(timespec="seconds") if at else None, "text": text,
                 "starred": starred,
-            })
+            }
+            if voice is None:
+                lines.append(f"{mark}[{stamp}] {text}")
+                words.append(entry)
+                continue
+            who, score = voice.label(audio, seg.start, seg.end)
+            entry["speaker"] = who
+            entry["match"] = round(score, 2) if score is not None else None
+            if who == pv.ME:
+                lines.append(f"{mark}[{stamp}] {me_name}: {text}")
+                withheld_run = False
+            elif consent and not pv.is_allowed(at, allowed):
+                entry["text"], entry["withheld"] = None, True
+                withheld += 1
+                if not withheld_run or starred:
+                    lines.append(f"{mark}[{stamp}] {pv.WITHHELD}")
+                withheld_run = True
+            else:
+                label = "Someone else" if who == pv.OTHER else "Unclear"
+                lines.append(f"{mark}[{stamp}] {label}: {text}")
+                withheld_run = False
+            del text
+            words.append(entry)
         del audio
     # Write the JSON first: the .txt is what marks a recording as done.
     _write_atomic(wav.with_suffix(".words.json"), json.dumps({
@@ -342,7 +382,11 @@ def transcribe_one(model, wav: Path):
         "recording_start": start.isoformat(timespec="seconds") if start else None,
         "duration": round(duration, 1),
         "vocabulary": vocab if extra else None,
-        "stars": [t.isoformat(timespec="seconds") for t in stars], "segments": words,
+        "stars": [t.isoformat(timespec="seconds") for t in stars],
+        "voice": None if voice is None else {
+            "model": pv.MODEL_NAME, "match_at": voice.match, "consent_mode": bool(consent),
+            "others_left_out": withheld},
+        "segments": words,
     }, indent=1))
     _write_atomic(wav.with_suffix(".txt"), ("\n".join(lines) if lines else NO_SPEECH) + "\n")
     return duration, len(lines)
@@ -476,12 +520,127 @@ def run_tidy(archive: Path):
     report_space(archive)
 
 
+# Your voice and consent mode (see pendant_voice.py).
+
+def read_slice(wav: Path, start: float, end: float):
+    """float32 samples of wav from start to end seconds, without reading the whole file."""
+    import wave
+    import numpy as np
+    with wave.open(str(wav), "rb") as w:
+        rate = w.getframerate()
+        a = max(0, int(start * rate))
+        w.setpos(min(a, w.getnframes()))
+        n = max(0, min(int(end * rate), w.getnframes()) - a)
+        x = np.frombuffer(w.readframes(n), dtype="<i2").astype(np.float32)
+    x /= 32768.0
+    return x
+
+
+def _parse_clock(day: str, hhmm: str):
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.strptime(f"{day} {hhmm}", fmt)
+        except ValueError:
+            pass
+    sys.exit(f"Not a time: {hhmm} (use HH:MM or HH:MM:SS, as shown in the transcripts)")
+
+
+def _day_segments(day: str, start: datetime, end: datetime):
+    """(wav, segment) for transcript lines on that day between start and end."""
+    for wj in sorted((ARCHIVE / day).glob("pendant_*.words.json")):
+        wav = wj.with_name(wj.name[: -len(".words.json")] + ".wav")
+        try:
+            segs = json.loads(wj.read_text()).get("segments", [])
+        except (OSError, ValueError):
+            continue
+        for seg in segs:
+            try:
+                at = datetime.fromisoformat(seg["at"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if start <= at <= end:
+                yield wav, seg
+
+
+def learn_voice(args, embedder=None):
+    """--learn-voice YYYY-MM-DD HH:MM HH:MM  (a stretch where only you talk), or FILE.wav"""
+    embed = embedder or pv.Embedder()
+    if len(args) == 1:
+        wav = Path(args[0]).expanduser()
+        if not wav.is_file():
+            sys.exit(f"Not found: {wav}")
+        pieces, source = [read_wav(wav)], wav.name
+    elif len(args) == 3:
+        day, a, b = args
+        start, end = _parse_clock(day, a), _parse_clock(day, b)
+        pieces = []
+        for wav, seg in _day_segments(day, start, end):
+            if wav.exists():
+                pieces.append(read_slice(wav, seg["start"], seg["end"]))
+        if not pieces:
+            sys.exit(f"No transcribed speech found on {day} between {a} and {b} "
+                     "(with its WAV still there). Check the times against a transcript.")
+        source = f"{day} {a}-{b}"
+    else:
+        sys.exit("Usage: pendant transcribe --learn-voice YYYY-MM-DD HH:MM HH:MM   (only you talking)\n"
+                 "   or: pendant transcribe --learn-voice FILE.wav")
+    try:
+        vector, kept, dropped = pv.learn(pieces, embed)
+    except ValueError as e:
+        sys.exit(f"Couldn't learn your voice: {e}")
+    path = pv.save_voiceprint(vector, source, kept)
+    print(f"Learned your voice from {kept:.0f} s of speech ({source})."
+          + (f" Left out {dropped:.0f} s that didn't sound like the rest." if dropped >= 1 else ""))
+    print(f"Saved to {path} (only on this Pi). From now on transcripts label your lines and, in consent")
+    print("mode, leave out what others say. Try it: pendant transcribe --voice-check FILE")
+    print("To relabel recent days: pendant transcribe --redo-day YYYY-MM-DD")
+    return 0
+
+
+def voice_check(target, voice):
+    """--voice-check FILE: how each line of an existing transcript would be labelled."""
+    wav = Path(target).expanduser().with_suffix(".wav")
+    wj = wav.with_suffix(".words.json")
+    if not (wav.exists() and wj.exists()):
+        sys.exit(f"Needs both {wav.name} and its transcript.")
+    counts = {pv.ME: 0, pv.OTHER: 0, pv.UNCLEAR: 0}
+    for seg in json.loads(wj.read_text()).get("segments", []):
+        a, b = seg["start"], seg["end"]
+        pad = max(0.0, (pv.PAD_TO - (b - a)) / 2)
+        lo = max(0.0, a - pad)
+        window = read_slice(wav, lo, b + pad)
+        who, score = voice.label(window, a - lo, b - lo)
+        counts[who] += 1
+        at = (seg.get("at") or "")[11:19] or _clock(a)
+        shown = seg.get("text") if who == pv.ME else ""
+        print(f"[{at}] {who:8s} {'' if score is None else f'{score:.2f}'}  {shown or ''}"[:120])
+    print(f"{counts[pv.ME]} yours, {counts[pv.OTHER]} someone else, {counts[pv.UNCLEAR]} unclear "
+          f"(yours at {voice.match:.2f} or more; set PENDANT_VOICE_MATCH to adjust)")
+    return 0
+
+
+def allow(args):
+    """--allow YYYY-MM-DD HH:MM HH:MM [NOTE]: the people there agreed to be transcribed."""
+    if len(args) < 3:
+        sys.exit("Usage: pendant transcribe --allow YYYY-MM-DD HH:MM HH:MM [note]")
+    day, a, b, note = args[0], args[1], args[2], " ".join(args[3:])
+    start, end = _parse_clock(day, a), _parse_clock(day, b)
+    if end < start:
+        sys.exit("The end time is before the start time.")
+    pv.add_allowed(ARCHIVE, start, end, note)
+    affected = sorted({wav for wav, seg in _day_segments(day, start, end) if seg.get("withheld")})
+    print(f"Noted: others agreed to be transcribed on {day} from {a} to {b}.")
+    for wav in affected:
+        print(f"  Redo to fill in their words: pendant transcribe --redo {wav}")
+    return 0
+
+
 def load_model():
     from faster_whisper import WhisperModel
     return WhisperModel(MODEL, device="cpu", compute_type="int8", cpu_threads=THREADS)
 
 
-def main(argv=None, model_factory=load_model):
+def main(argv=None, model_factory=load_model, voice_factory=pv.load_voice):
     ap = argparse.ArgumentParser(prog="pendant transcribe", description="Transcribe recordings on this computer.")
     ap.add_argument("--list", action="store_true", help="show recordings waiting for a transcript")
     ap.add_argument("--limit", type=int, default=0, help="do at most this many recordings")
@@ -489,7 +648,26 @@ def main(argv=None, model_factory=load_model):
     ap.add_argument("--redo-day", metavar="YYYY-MM-DD", help="transcribe every recording from that day again")
     ap.add_argument("--check", metavar="FILE", help="show loudness and detected speech for one recording")
     ap.add_argument("--tidy", action="store_true", help="only delete old WAVs (see PENDANT_KEEP_WAV_DAYS)")
+    ap.add_argument("--learn-voice", nargs="+", metavar="ARG",
+                    help="learn your voice: YYYY-MM-DD HH:MM HH:MM (a stretch where only you talk), or FILE.wav")
+    ap.add_argument("--forget-voice", action="store_true", help="delete your learned voice")
+    ap.add_argument("--voice-check", metavar="FILE", help="show how each line of a transcript would be labelled")
+    ap.add_argument("--allow", nargs="+", metavar="ARG",
+                    help="YYYY-MM-DD HH:MM HH:MM [note]: the people there agreed to be transcribed")
     args = ap.parse_args(argv)
+
+    if args.learn_voice:
+        return learn_voice(args.learn_voice)
+    if args.forget_voice:
+        print("Your learned voice was deleted." if pv.forget_voiceprint() else "No learned voice to delete.")
+        return 0
+    if args.allow:
+        return allow(args.allow)
+    if args.voice_check:
+        voice, why = pv.load_voice(setting)
+        if voice is None:
+            sys.exit(f"Can't check: {why}.")
+        return voice_check(args.voice_check, voice)
 
     if args.tidy:
         run_tidy(ARCHIVE)
@@ -534,11 +712,19 @@ def main(argv=None, model_factory=load_model):
 
     log(f"Transcribing {len(todo)} recording(s) with {MODEL}")
     model = model_factory()
+    voice, why = voice_factory(setting)
+    consent = pv.consent_mode_on(setting)
+    allowed = pv.load_allowed(ARCHIVE)
+    if voice is None:
+        log(f"  Not labelling voices: {why}.")
+    else:
+        log("  Labelling your voice; consent mode " + ("on: what others say is left out"
+            + (f" except in {len(allowed)} allowed stretch(es)" if allowed else "") if consent else "off"))
     failed = 0
     for wav in todo:
         t0 = time.monotonic()
         try:
-            audio, n = transcribe_one(model, wav)
+            audio, n = transcribe_one(model, wav, voice, allowed, consent)
         except Exception as e:  # keep going; this one stays pending and is tried next time
             failed += 1
             log(f"  {wav.name}: failed ({e})")

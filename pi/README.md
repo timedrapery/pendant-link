@@ -275,6 +275,42 @@ On a Pi 4 it runs about 1.4× faster than real time for steady talking, and far 
 
 **Vocabulary.** The speech model is English-only, so words it hasn't learned come out as English look-alikes ("Pali Canon" as "polycan"). Give it a list of words to expect and it spells them right. It starts with a short list of Pali Dhamma terms (dukkha, samadhi, sutta, SuttaCentral, ...). Use your own, such as names, places, or terms from your work, by putting them in `~/.config/pendant/vocabulary.txt`, separated by commas or new lines (`#` starts a comment). An empty file, or `PENDANT_VOCABULARY=off` in `~/.config/pendant/env`, turns it off. It applies to transcripts made from then on; redo a day with `pendant transcribe --redo-day <YYYY-MM-DD>`. Keep the list short (a few dozen words): it's sent with every 30 seconds of audio.
 
+### Your voice and consent mode
+
+The pendant hears everyone around you. Once it knows your voice, transcripts keep your words and leave other people's out:
+
+```
+[09:12:03] Me: I'll take the early shift on Thursday.
+[09:12:09] (someone else spoke)
+[09:12:30] Me: Sounds good, see you then.
+```
+
+Each stretch of speech is compared with a summary of your voice (a list of 192 numbers) and labelled as you or not you. It never tries to tell other people apart from each other, so nobody else's voice is ever summarised or stored. What others said exists only in the Pi's memory while a recording is transcribed, and is never written to a transcript, Drive, or anywhere Claude can read. The audio is kept as before (on the Pi and in the encrypted backup), so if people later agree, their part can still be transcribed.
+
+**Teach it your voice, once.** Find a stretch of a day's transcript where only you were talking, about a minute or more (reading something aloud works well), and give its start and end times:
+
+```
+pendant transcribe --learn-voice 2026-10-12 09:10 09:14
+```
+
+Or record yourself on purpose: talk alone for two minutes, run `pendant sync`, wait for `pendant transcribe`, then use those times. It needs at least 30 seconds that all sound like one voice, and leaves out any pieces that don't. Your voice summary is kept only in `~/.config/pendant/voiceprint.json`, readable only by you, and not in the backup. On a new Pi, teach it again. `pendant transcribe --forget-voice` deletes it.
+
+**Check it.** `pendant transcribe --voice-check ~/recordings/<day>/<file>` lists each line of a transcript as `me`, `other` or `unclear`, with a score (your lines usually score 0.6 or higher, other people under 0.35). If too many of your own lines come out as someone else, lower `PENDANT_VOICE_MATCH` (0.42 by default) in `~/.config/pendant/env` a little. Short replies such as "yeah" are often too short to tell and are left out with the others.
+
+**Then relabel recent days**, so transcripts from before you taught it lose other people's words too (the copies on Drive are replaced at the next backup):
+
+```
+pendant transcribe --redo-day 2026-10-12
+```
+
+**When people agree.** If the people you were with say they're happy to be transcribed, note the time and redo the recordings it prints:
+
+```
+pendant transcribe --allow 2026-10-12 18:00 20:30 dinner with family
+```
+
+Their lines then show as `Someone else: ...`. Allowed times are kept in `~/recordings/consent.json`. To keep everyone's words everywhere, put `PENDANT_CONSENT_MODE=off` in `~/.config/pendant/env`. To show your own name instead of "Me", set `PENDANT_MY_NAME`.
+
 Settings, in `~/.config/pendant/env` or before the command: `PENDANT_WHISPER_MODEL` (`base.en` by default; `tiny.en` is faster, `small.en` more accurate but may not keep up on a Pi 4), `PENDANT_WHISPER_BEAM` (1; higher is slower and slightly more accurate).
 
 ## 9. Nightly backup to Google Drive (optional)
@@ -389,7 +425,7 @@ What you need from outside the Pi: the `PENDANT KEYS` block from your password m
    ```
 
    The check should end with "Backup check passed".
-6. Steps 8 and 11 (transcripts, browse page). Open the page and play a recording: older ones offer a button to rebuild the playable file.
+6. Steps 8 and 11 (transcripts, browse page). Open the page and play a recording: older ones offer a button to rebuild the playable file. Teach it your voice again (see "Your voice and consent mode" in step 8): the voice summary isn't in the backup, on purpose.
 7. Turn the timers on (steps 6, 8, 9).
 
 **Practise it first.** You can rehearse on a second Pi or a spare SD card while the real Pi keeps running: do steps 1, 2, 5 and 6 above, skipping the pendant (use `export PENDANT_ADDRESS=00:00:00:00:00:00` for the install in step 3, and don't turn on any timers). The old Pi isn't touched, and the pendant stays paired with it. When `pendant backup --check` passes and a recording plays on the practice Pi, you know your vault copy and your backup are enough on their own.
@@ -403,6 +439,8 @@ What you need from outside the Pi: the `PENDANT KEYS` block from your password m
 | `pendant transcribe` | Transcribe anything new now |
 | `pendant transcribe --list` | Show recordings waiting for a transcript |
 | `pendant transcribe --redo-day 2026-10-10` | Transcribe a whole day again |
+| `pendant transcribe --learn-voice 2026-10-12 09:10 09:14` | Teach it your voice from a stretch where only you talk |
+| `pendant transcribe --allow 2026-10-12 18:00 20:30 note` | Others there agreed: keep their words (then redo what it lists) |
 | `pendant transcribe --tidy` | Delete old WAVs now and show free space |
 | `pendant decode <file>.opus` | Rebuild a WAV to listen to |
 | `pendant backup` | Back up now |
@@ -425,6 +463,8 @@ What you need from outside the Pi: the `PENDANT KEYS` block from your password m
 | `~/recordings/.unreadable-pages.json` | How many syncs each unreadable page has failed in |
 | `~/recordings/.replaced/` | Copies set aside because a newer download holds all of them (safe to delete once you're happy) |
 | `~/.config/pendant/env` | Settings: your pendant's address, options |
+| `~/.config/pendant/voiceprint.json` | The summary of your voice (only yours; not backed up) |
+| `~/recordings/consent.json` | Times when the people you were with agreed to be transcribed |
 | `~/.config/pendant/keys/` | Your encryption keys and backup passwords. Keep a copy elsewhere. |
 | `~/.local/share/pendant/` | The sync, backup and transcription scripts, and the transcription environment |
 | `~/.config/systemd/user/pendant-*` | The three timers and their jobs, and the browse page |

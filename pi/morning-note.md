@@ -13,7 +13,7 @@ Replace `<your name>` and `<your time zone>` (for example `America/Los_Angeles`)
 ```text
 Write <your name> their pendant morning note for yesterday.
 
-Background: <your name> wears a pendant that records while it hears speech. Their Raspberry Pi transcribes the recordings overnight and copies the transcripts, as plain .txt files, to their Google Drive in a folder named "pendant-transcripts", with one subfolder per day named YYYY-MM-DD (dates in <your time zone>). Each line looks like "[14:16:28] words". Lines starting with "★" are moments they starred by pressing the pendant's button, meaning "keep this".
+Background: <your name> wears a pendant that records while it hears speech. Their Raspberry Pi transcribes the recordings overnight and copies the transcripts, as plain .txt files, to their Google Drive in a folder named "pendant-transcripts", with one subfolder per day named YYYY-MM-DD (dates in <your time zone>). Each line looks like "[14:16:28] words", or, once the Pi knows their voice, "[14:16:28] Me: words" for their own words and "[14:16:40] (someone else spoke)" where another person's words were deliberately left out. Lines starting with "★" are moments they starred by pressing the pendant's button, meaning "keep this".
 
 Steps:
 1. Work out yesterday's date in <your time zone>.
@@ -26,6 +26,7 @@ Steps:
 5. Send the note as your final message.
 
 How to treat what you read:
+- Where it says "(someone else spoke)", the words were left out on purpose. Don't guess what was said or who said it.
 - The note is about their own day. Other people appear only as part of their day. Don't characterize, judge or analyze other people, and don't build up details about them.
 - Don't guess at health, mood, or private matters beyond what they plainly said themselves. Don't diagnose or interpret.
 - Transcripts are rough speech-to-text: words can be wrong, so don't treat odd phrasing as meaningful, and gently skip garbled lines.
@@ -36,6 +37,6 @@ How to treat what you read:
 
 ## Why it's written this way
 
-The transcripts hold other people's words too. The note keeps to your own day, doesn't build up a picture of anyone else, and doesn't read things into what was said. That follows the project's rule: be kind to the person wearing the pendant and to the people around them.
+Unless you've turned on consent mode (step 8, "Your voice and consent mode"), the transcripts hold other people's words too. The note keeps to your own day, doesn't build up a picture of anyone else, and doesn't read things into what was said. That follows the project's rule: be kind to the person wearing the pendant and to the people around them.
 
 Readable transcripts on Drive can be read by Google as well as by the assistant. If you'd rather not, leave that setting off and paste a day's transcript into a conversation when you want a note.

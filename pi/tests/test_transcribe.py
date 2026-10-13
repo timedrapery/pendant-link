@@ -13,6 +13,7 @@ HERE = Path(__file__).resolve().parent.parent
 @pytest.fixture
 def tr(tmp_path, monkeypatch):
     monkeypatch.setenv("PENDANT_ARCHIVE", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path / ".home"))  # no real voiceprint or settings
     spec = importlib.util.spec_from_file_location("pendant_transcribe", HERE / "pendant-transcribe.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
