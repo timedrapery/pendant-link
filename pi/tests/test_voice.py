@@ -155,3 +155,33 @@ def test_allow_points_at_recordings_to_redo(tr, tmp_path, capsys):
 def test_load_voice_needs_a_learned_voice(tr):
     voice, why = tr.pv.load_voice(embedder=lambda: fake_embed)
     assert voice is None and "learn-voice" in why
+
+
+def _pv():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pv", Path(__file__).resolve().parent.parent / "pendant_voice.py")
+    pv = importlib.util.module_from_spec(spec); spec.loader.exec_module(pv)
+    return pv
+
+
+def test_long_stretches_are_scored_in_pieces():
+    """Oct 12: the voice model failed on a 155-second stretch. Score it in pieces."""
+    pv = _pv()
+    seen = []
+
+    def limited(samples):
+        seen.append(len(samples))
+        if len(samples) > 120 * 16000:
+            raise RuntimeError("Attempting to broadcast an axis by a dimension other than 1")
+        return fake_embed(samples)
+    v = pv.Voice(ME_VEC, limited)
+    window = np.full(16000 * 160, 0.1, np.float32)
+    assert v.label(window, 2.0, 157.0)[0] == "me"
+    assert max(seen) <= 20 * 16000
+
+
+def test_a_stretch_the_model_cant_take_is_unclear_not_a_crash():
+    pv = _pv()
+    def broken(samples):
+        raise RuntimeError("onnxruntime error")
+    assert pv.Voice(ME_VEC, broken).label(np.zeros(16000 * 5, np.float32), 0, 4) == ("unclear", None)

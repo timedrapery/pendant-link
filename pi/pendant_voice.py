@@ -36,6 +36,7 @@ MATCH = 0.42        # at or above: sounds like you
 NOT_ME = 0.30       # below: someone else; in between: unclear
 MIN_SECONDS = 1.5   # shorter stretches are widened to PAD_TO seconds of surrounding audio
 PAD_TO = 2.0
+PIECE_SECONDS = 20.0  # longer stretches are scored in pieces this long
 LEARN_PIECE = 6.0   # learning splits your speech into pieces of at most this long...
 LEARN_MIN_PIECE = 2.0
 LEARN_NEED = 30.0   # ...and needs at least this many seconds that agree with each other
@@ -91,7 +92,17 @@ class Voice:
         self.match, self.not_me = match, min(not_me, match)
 
     def score(self, samples):
-        return float(self.embed(samples) @ self.me)
+        """Similarity to your voice. Long stretches are scored in pieces of at most
+        PIECE_SECONDS and averaged: the model can't take much more than two minutes at once
+        (Oct 12: a 155-second stretch failed)."""
+        import numpy as np
+        step = int(PIECE_SECONDS * RATE)
+        if len(samples) <= step:
+            return float(self.embed(samples) @ self.me)
+        pieces = [samples[i:i + step] for i in range(0, len(samples), step)]
+        if len(pieces) > 1 and len(pieces[-1]) < LEARN_MIN_PIECE * RATE:
+            pieces.pop()
+        return float(_unit(np.mean([self.embed(p) for p in pieces], axis=0)) @ self.me)
 
     def label(self, window, start, end):
         """Label window[start:end] (seconds within the window). Returns (label, score)."""
@@ -101,7 +112,10 @@ class Voice:
             a, b = max(0.0, mid - half), min(len(window) / RATE, mid + half)
             if b - a < 0.5:
                 return UNCLEAR, None
-        score = self.score(window[int(a * RATE):int(b * RATE)])
+        try:
+            score = self.score(window[int(a * RATE):int(b * RATE)])
+        except Exception:  # one odd stretch mustn't stop a whole recording
+            return UNCLEAR, None
         if score >= self.match:
             return ME, score
         return (OTHER if score < self.not_me else UNCLEAR), score
