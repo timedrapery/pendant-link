@@ -136,9 +136,10 @@ def test_range_parsing(web):
 def test_only_home_network_addresses(web):
     mod, _, _ = web
     for ok in ("127.0.0.1", "192.168.1.20", "10.0.0.5", "172.16.3.4", "::1", "fe80::1%wlan0",
-               "::ffff:192.168.1.20", "169.254.10.10"):
+               "::ffff:192.168.1.20", "169.254.10.10", "100.101.102.103", "fd7a:115c:a1e0::1"):
         assert mod.from_home_network(ok), ok
-    for bad in ("8.8.8.8", "52.1.2.3", "2606:4700::1111", "::ffff:8.8.8.8", "nonsense"):
+    for bad in ("8.8.8.8", "52.1.2.3", "2606:4700::1111", "::ffff:8.8.8.8", "nonsense",
+                "100.128.0.1", "100.63.255.255"):    # just outside Tailscale's range
         assert not mod.from_home_network(bad), bad
 
 

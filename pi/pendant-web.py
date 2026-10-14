@@ -305,7 +305,11 @@ def from_home_network(addr: str) -> bool:
         return False
     if getattr(ip, "ipv4_mapped", None):
         ip = ip.ipv4_mapped
-    return ip.is_loopback or ip.is_private or ip.is_link_local
+    # 100.64.0.0/10: Tailscale gives each of your devices an address here, and the link
+    # between them is encrypted, so the page can be opened from your laptop or phone away
+    # from home. Nothing on the internet can reach this range unless you share your tailnet.
+    tailnet = ip.version == 4 and ip in ipaddress.ip_network("100.64.0.0/10")
+    return ip.is_loopback or ip.is_private or ip.is_link_local or tailnet
 
 
 def tighten_settings(path: Path):

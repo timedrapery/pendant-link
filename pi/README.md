@@ -407,6 +407,25 @@ It prints the address to open (like `http://pendantpi.local:8765`, plus a number
 
 ---
 
+## Reaching the Pi away from home (optional)
+
+[Tailscale](https://tailscale.com) joins your own devices into a small private network, encrypted end to end, that works from anywhere: a coffee shop's guest Wi-Fi, your phone on mobile data. Nothing is opened on your router, and nothing else on the internet can reach the Pi. It's free for personal use and needs an account (Google sign-in works).
+
+On the Pi:
+
+```
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up --ssh
+```
+
+Open the link it prints and sign in. `--ssh` lets your own signed-in devices open a terminal on the Pi through Tailscale. On your laptop or phone, install the Tailscale app and sign in with the same account. Then, from anywhere:
+
+```
+ssh <your-user>@<pi-name>
+```
+
+The browse page (step 11) works the same way at `http://<pi-name>:8765` (the Pi's hostname, as in `hostname`). It accepts Tailscale's addresses (100.64.0.0/10) as well as your home Wi-Fi's, and still turns away everything else. If the short name doesn't work, use the Pi's Tailscale address from `tailscale ip -4`.
+
 ## Restoring onto a new Pi
 
 What you need from outside the Pi: the `PENDANT KEYS` block from your password manager (see step 9), and your Google account. What it brings back: every recording's compact audio, metadata, stars and transcripts. WAVs come back by rebuilding them from the audio.
