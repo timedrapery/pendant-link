@@ -307,7 +307,7 @@ index fb98890..4c861ff 100644
  # Register command groups
  cli.add_command(bluetooth.bt)
 diff --git a/src/pendant/commands/audio.py b/src/pendant/commands/audio.py
-index cf0b2e6..15b2bb5 100644
+index cf0b2e6..a884db3 100644
 --- a/src/pendant/commands/audio.py
 +++ b/src/pendant/commands/audio.py
 @@ -1,6 +1,8 @@
@@ -770,7 +770,7 @@ index cf0b2e6..15b2bb5 100644
          # Check if timestamps are real (synced) or just device uptime
          first_ts = client.page_timestamps[0].get("absolute_timestamp_ms", 0) if client.page_timestamps else 0
          timestamps_synced = first_ts > MIN_VALID_TIMESTAMP_MS
-@@ -102,25 +476,208 @@ def download(ctx, decode, output):
+@@ -102,25 +476,214 @@ def download(ctx, decode, output):
              "download_time_iso": datetime.now().isoformat(),
              "timestamps_synced": timestamps_synced,
              "total_pages": client.page_count,
@@ -958,6 +958,12 @@ index cf0b2e6..15b2bb5 100644
 +        "sync_mode": (client.last_status or {}).get("sync_mode_label"),
 +        "sync_mode_on_arrival": (getattr(client, "first_status", None) or {}).get("sync_mode_label"),
 +    }
++    # One line per sync in the log, so battery drain can be followed over a day:
++    #   grep -a "Battery at" ~/recordings/sync.log
++    if battery is not None:
++        click.echo(f"Battery at {health['last_sync'][:16].replace('T', ' ')}: {battery}%"
++                   + (" (charging)" if health["charging"] else "")
++                   + f", {client.page_count} pages this sync")
 +    if freeing is not None and client.page_count:
 +        if freeing.get("freed"):
 +            health["last_freed"] = health["last_sync"]
