@@ -34,8 +34,11 @@ MODEL_SHA256 = "ad4a1802485d8b34c722d2a9d04249662f2ece5d28a7a039063ca22f515a789e
 
 MATCH = 0.42        # at or above: sounds like you
 NOT_ME = 0.30       # below: someone else; in between: unclear
-MIN_SECONDS = 1.5   # shorter stretches are widened to PAD_TO seconds of surrounding audio
-PAD_TO = 2.0
+MIN_SECONDS = 1.0   # less voiced audio than this: too short to tell (unclear)
+SHORT_WORDS = 2     # lines of this many words or fewer ("Yes.", "That's right.") are unclear
+PAD_TO = 2.0        # --voice-check reads at least this much audio around a line
+QUIETER_DB = 15.0   # this much quieter than you usually are at the pendant: not you
+FRAME = 480         # 30 ms, for loudness
 PIECE_SECONDS = 20.0  # longer stretches are scored in pieces this long
 LEARN_PIECE = 6.0   # learning splits your speech into pieces of at most this long...
 LEARN_MIN_PIECE = 2.0
@@ -84,12 +87,48 @@ class Embedder:
         return _unit(self._ex.compute(s))
 
 
-class Voice:
-    """Labels stretches of speech as you, someone else, or unclear."""
+def _frames_db(samples):
+    """Loudness of each 30 ms frame, in dB below full scale."""
+    import numpy as np
+    n = len(samples) // FRAME
+    if n == 0:
+        return np.zeros(0)
+    f = samples[: n * FRAME].reshape(n, FRAME)
+    return 10 * np.log10((f.astype(np.float64) ** 2).mean(axis=1) + 1e-10)
 
-    def __init__(self, me, embed, match=MATCH, not_me=NOT_ME):
+
+def voiced(samples):
+    """(the frames that hold the voice, their loudness in dB). Silence and faint background
+    between words are dropped so they don't water down the comparison."""
+    import numpy as np
+    db = _frames_db(samples)
+    if len(db) == 0:
+        return samples[:0], None
+    peak = float(np.percentile(db, 95))
+    keep = db >= max(peak - 20, -60)
+    if not keep.any():
+        return samples[:0], None
+    f = samples[: len(db) * FRAME].reshape(len(db), FRAME)[keep].reshape(-1)
+    return f, float(np.percentile(db[keep], 90))
+
+
+def loudness(samples):
+    return voiced(samples)[1]
+
+
+class Voice:
+    """Labels stretches of speech as you, someone else, or unclear.
+
+    Two things are checked: whether it sounds like your voice, and (once known) whether it's
+    about as loud as you are at the pendant. You're always close to it, so someone across the
+    room who happens to sound a bit like you is much quieter. Very short replies ("Yes.")
+    are too short to tell either way, and are unclear (left out in consent mode).
+    """
+
+    def __init__(self, me, embed, match=MATCH, not_me=NOT_ME, my_db=None, quieter_db=QUIETER_DB):
         self.me, self.embed = _unit(me), embed
         self.match, self.not_me = match, min(not_me, match)
+        self.my_db, self.quieter_db = my_db, quieter_db
 
     def score(self, samples):
         """Similarity to your voice. Long stretches are scored in pieces of at most
@@ -104,21 +143,30 @@ class Voice:
             pieces.pop()
         return float(_unit(np.mean([self.embed(p) for p in pieces], axis=0)) @ self.me)
 
-    def label(self, window, start, end):
-        """Label window[start:end] (seconds within the window). Returns (label, score)."""
+    def check(self, window, start, end, words=None):
+        """(label, score, loudness dB) for window[start:end] (seconds within the window)."""
         a, b = max(0.0, start), min(len(window) / RATE, end)
-        if b - a < MIN_SECONDS:
-            mid, half = (a + b) / 2, PAD_TO / 2
-            a, b = max(0.0, mid - half), min(len(window) / RATE, mid + half)
-            if b - a < 0.5:
-                return UNCLEAR, None
+        if words is not None and words <= SHORT_WORDS:
+            return UNCLEAR, None, None
+        audio, db = voiced(window[int(a * RATE):int(b * RATE)])
+        if len(audio) < MIN_SECONDS * RATE:
+            return UNCLEAR, None, db
         try:
-            score = self.score(window[int(a * RATE):int(b * RATE)])
+            score = self.score(audio)
         except Exception:  # one odd stretch mustn't stop a whole recording
-            return UNCLEAR, None
-        if score >= self.match:
-            return ME, score
-        return (OTHER if score < self.not_me else UNCLEAR), score
+            return UNCLEAR, None, db
+        if score < self.not_me:
+            return OTHER, score, db
+        if score < self.match:
+            return UNCLEAR, score, db
+        if self.my_db is not None and db is not None and db < self.my_db - self.quieter_db:
+            return OTHER, score, db       # sounds a bit like you, but from across the room
+        return ME, score, db
+
+    def label(self, window, start, end, words=None):
+        """(label, score) for window[start:end]."""
+        who, score, _ = self.check(window, start, end, words)
+        return who, score
 
 
 def _setting(setting, name, default):
@@ -148,20 +196,27 @@ def load_voice(setting=None, embedder=Embedder):
         match = float(_setting(setting, "PENDANT_VOICE_MATCH", MATCH))
     except ValueError:
         match = MATCH
-    return Voice(me, embed, match=match, not_me=min(NOT_ME, match)), None
+    try:
+        quieter = float(_setting(setting, "PENDANT_VOICE_QUIETER_DB", QUIETER_DB))
+    except ValueError:
+        quieter = QUIETER_DB
+    return Voice(me, embed, match=match, not_me=min(NOT_ME, match),
+                 my_db=rec.get("loudness_db"), quieter_db=quieter), None
 
 
 def learn(pieces, embed):
     """Your voice summary from stretches of your own speech (float32 arrays).
 
     Long stretches are split; pieces that don't agree with the rest (someone else talking,
-    noise) are left out. Returns (vector, seconds kept, seconds left out); raises ValueError
+    noise) are left out. Returns (vector, seconds kept, seconds left out, your usual loudness
+    in dB); raises ValueError
     when there isn't enough.
     """
     import numpy as np
     chunks = []
     step = int(LEARN_PIECE * RATE)
     for p in pieces:
+        p = voiced(p)[0]
         for i in range(0, len(p), step):
             c = p[i:i + step]
             if len(c) >= LEARN_MIN_PIECE * RATE:
@@ -180,10 +235,13 @@ def learn(pieces, embed):
     if kept < LEARN_NEED:
         raise ValueError(f"only {kept:.0f} s of speech that sounds like one voice; need {LEARN_NEED:.0f} s. "
                          "Pick a longer stretch where only you are talking.")
-    return mean, kept, dropped
+    levels = [loudness(chunks[i]) for i in keep]
+    levels = [x for x in levels if x is not None]
+    my_db = float(np.median(levels)) if levels else None
+    return mean, kept, dropped, my_db
 
 
-def save_voiceprint(vector, source, kept):
+def save_voiceprint(vector, source, kept, my_db=None):
     path = voiceprint_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
@@ -192,6 +250,7 @@ def save_voiceprint(vector, source, kept):
     with os.fdopen(fd, "w") as f:
         json.dump({"model": MODEL_NAME, "made": datetime.now().isoformat(timespec="seconds"),
                    "from": source, "seconds": round(kept, 1),
+                   "loudness_db": None if my_db is None else round(my_db, 1),
                    "vector": [round(float(x), 6) for x in vector]}, f)
     tmp.replace(path)
     return path

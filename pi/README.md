@@ -295,7 +295,12 @@ pendant transcribe --learn-voice 2026-10-12 09:10 09:14
 
 Or record yourself on purpose: talk alone for two minutes, run `pendant sync`, wait for `pendant transcribe`, then use those times. It needs at least 30 seconds that all sound like one voice, and leaves out any pieces that don't. Your voice summary is kept only in `~/.config/pendant/voiceprint.json`, readable only by you, and not in the backup. On a new Pi, teach it again. `pendant transcribe --forget-voice` deletes it.
 
-**Check it.** `pendant transcribe --voice-check ~/recordings/<day>/<file>` lists each line of a transcript as `me`, `other` or `unclear`, with a score (your lines usually score 0.6 or higher, other people under 0.35). If too many of your own lines come out as someone else, lower `PENDANT_VOICE_MATCH` (0.42 by default) in `~/.config/pendant/env` a little. Short replies such as "yeah" are often too short to tell and are left out with the others.
+**Check it.** `pendant transcribe --voice-check ~/recordings/<day>/<file>` lists each line of a transcript as `me`, `other` or `unclear`, with how much it sounds like you (your lines usually score 0.6 or higher, other people under 0.35) and how loud it was. Two more rules keep other people out:
+
+- **Very short replies** ("Yes.", "That's right.", two words or fewer) are too short to tell apart, so they're `unclear` and left out with the others. That includes your own "yeah"s.
+- **Loudness.** You're always right next to the pendant, so you're much louder on it than anyone else. Learning your voice also notes how loud you usually are; a line that sounds a bit like you but is 15 dB or more quieter counts as someone else. `PENDANT_VOICE_QUIETER_DB` changes the 15.
+
+If too many of your own lines come out as someone else, lower `PENDANT_VOICE_MATCH` (0.42 by default) in `~/.config/pendant/env` a little.
 
 **Then relabel recent days**, so transcripts from before you taught it lose other people's words too (the copies on Drive are replaced at the next backup):
 

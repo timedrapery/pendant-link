@@ -21,7 +21,7 @@ ME_VEC, OTHER_VEC, MIXED = np.array([1.0, 0, 0]), np.array([0, 1.0, 0]), np.arra
 
 def fake_embed(samples):
     m = float(np.mean(samples)) if len(samples) else 0.0
-    if abs(m) < 0.05:          # a mix of voices sounds like neither
+    if abs(m) < 0.002:         # a mix of voices sounds like neither
         return MIXED
     return ME_VEC if m > 0 else OTHER_VEC
 
@@ -105,22 +105,42 @@ def test_your_name_and_stars(tr, tmp_path, monkeypatch):
     assert wav.with_suffix(".txt").read_text().startswith("[09:00:01] Analayo: ")
 
 
-def test_short_stretches_use_the_audio_around_them():
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("pv", Path(__file__).resolve().parent.parent / "pendant_voice.py")
-    pv = importlib.util.module_from_spec(spec); spec.loader.exec_module(pv)
+def test_short_replies_are_unclear():
+    """Oct 13: "Yes." and "That's right." from listeners scored as you, padded with the
+    talk around them. Replies that short can't be told apart; leave them unclear."""
+    pv = _pv()
     v = pv.Voice(ME_VEC, fake_embed)
-    window = np.concatenate([np.full(32000, 0.1, np.float32), np.full(32000, -0.1, np.float32)])
-    assert v.label(window, 0.5, 1.0)[0] == "me"         # 0.5 s, widened to 2 s: all yours
-    assert v.label(window, 3.0, 3.5)[0] == "other"
-    assert v.label(window, 1.8, 2.2)[0] == "unclear"   # half and half
+    window = np.full(16000 * 10, 0.1, np.float32)
+    assert v.label(window, 2.0, 4.0, words=1) == ("unclear", None)
+    assert v.label(window, 2.0, 4.0, words=2) == ("unclear", None)
+    assert v.label(window, 2.0, 4.0, words=5)[0] == "me"
+    assert v.label(window, 2.0, 2.6)[0] == "unclear"        # under a second of voice
+
+
+def test_someone_quieter_than_you_is_not_you():
+    pv = _pv()
+    v = pv.Voice(ME_VEC, fake_embed, my_db=-20.0)
+    near = np.full(16000 * 4, 0.1, np.float32)                  # about -20 dB
+    far = np.full(16000 * 4, 0.008, np.float32)                 # about -42 dB, same "voice"
+    assert v.label(near, 0, 4, words=5)[0] == "me"
+    assert v.label(far, 0, 4, words=5)[0] == "other"
+
+
+def test_silence_inside_a_line_doesnt_count():
+    pv = _pv()
+    v = pv.Voice(ME_VEC, fake_embed)
+    window = np.concatenate([np.zeros(16000 * 6, np.float32), np.full(24000, 0.1, np.float32),
+                             np.zeros(16000 * 6, np.float32)])
+    who, score, db = v.check(window, 0, len(window) / 16000, words=6)
+    assert who == "me" and db is not None and db > -25
 
 
 def test_learn_keeps_only_pieces_that_agree(tr):
     me = [np.full(16000 * 40, 0.1, np.float32)]
     other = [np.full(16000 * 10, -0.1, np.float32)]
-    vec, kept, dropped = tr.pv.learn(me + other, fake_embed)
-    assert float(vec @ ME_VEC) > 0.99 and kept == 40 and dropped == 10
+    vec, kept, dropped, my_db = tr.pv.learn(me + other, fake_embed)
+    assert float(vec @ ME_VEC) > 0.99 and round(kept) == 40 and round(dropped) == 10
+    assert abs(my_db - 20 * np.log10(0.1)) < 0.5
     with pytest.raises(ValueError, match="need 30"):
         tr.pv.learn([np.full(16000 * 20, 0.1, np.float32)], fake_embed)
 
@@ -137,6 +157,7 @@ def test_learn_voice_from_a_stretch_of_a_day(tr, tmp_path, monkeypatch, capsys):
     assert oct(vp.stat().st_mode & 0o777) == "0o600"
     rec = json.loads(vp.read_text())
     assert rec["from"] == "2026-10-12 09:00-09:01" and rec["vector"][0] > 0.99
+    assert rec["loudness_db"] is not None
     assert tr.main(["--forget-voice"]) == 0 and not vp.exists()
 
 

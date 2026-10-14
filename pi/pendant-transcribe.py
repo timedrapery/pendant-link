@@ -357,7 +357,7 @@ def transcribe_one(model, wav: Path, voice=None, allowed=(), consent=True):
                 lines.append(f"{mark}[{stamp}] {text}")
                 words.append(entry)
                 continue
-            who, score = voice.label(audio, seg.start, seg.end)
+            who, score = voice.label(audio, seg.start, seg.end, words=len(text.split()))
             entry["speaker"] = who
             entry["match"] = round(score, 2) if score is not None else None
             if who == pv.ME:
@@ -585,10 +585,10 @@ def learn_voice(args, embedder=None):
         sys.exit("Usage: pendant transcribe --learn-voice YYYY-MM-DD HH:MM HH:MM   (only you talking)\n"
                  "   or: pendant transcribe --learn-voice FILE.wav")
     try:
-        vector, kept, dropped = pv.learn(pieces, embed)
+        vector, kept, dropped, my_db = pv.learn(pieces, embed)
     except ValueError as e:
         sys.exit(f"Couldn't learn your voice: {e}")
-    path = pv.save_voiceprint(vector, source, kept)
+    path = pv.save_voiceprint(vector, source, kept, my_db)
     print(f"Learned your voice from {kept:.0f} s of speech ({source})."
           + (f" Left out {dropped:.0f} s that didn't sound like the rest." if dropped >= 1 else ""))
     print(f"Saved to {path} (only on this Pi). From now on transcripts label your lines and, in consent")
@@ -609,13 +609,19 @@ def voice_check(target, voice):
         pad = max(0.0, (pv.PAD_TO - (b - a)) / 2)
         lo = max(0.0, a - pad)
         window = read_slice(wav, lo, b + pad)
-        who, score = voice.label(window, a - lo, b - lo)
+        text = seg.get("text")
+        who, score, db = voice.check(window, a - lo, b - lo, words=len(text.split()) if text else None)
         counts[who] += 1
         at = (seg.get("at") or "")[11:19] or _clock(a)
-        shown = seg.get("text") if who == pv.ME else ""
-        print(f"[{at}] {who:8s} {'' if score is None else f'{score:.2f}'}  {shown or ''}"[:120])
+        shown = text if who == pv.ME else ""
+        sc = "    " if score is None else f"{score:.2f}"
+        loud = "      " if db is None else f"{db:4.0f}dB"
+        print(f"[{at}] {who:8s} {sc} {loud}  {shown or ''}"[:120])
+    usual = (f"; you're usually about {voice.my_db:.0f} dB, and much quieter than that "
+             f"({voice.quieter_db:.0f} dB) counts as someone else" if voice.my_db is not None else
+             "; learn your voice again to also check loudness")
     print(f"{counts[pv.ME]} yours, {counts[pv.OTHER]} someone else, {counts[pv.UNCLEAR]} unclear "
-          f"(yours at {voice.match:.2f} or more; set PENDANT_VOICE_MATCH to adjust)")
+          f"(yours at {voice.match:.2f} or more{usual})")
     return 0
 
 
