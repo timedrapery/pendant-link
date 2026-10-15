@@ -1337,10 +1337,10 @@ index cc35325..2e19d7e 100644
 +    if keys:
 +        click.echo(f"  Audio key id: {audiocrypto.key_id(keys[0])}")
 diff --git a/src/pendant/commands/device.py b/src/pendant/commands/device.py
-index e05b050..3e02c5a 100644
+index e05b050..3679f20 100644
 --- a/src/pendant/commands/device.py
 +++ b/src/pendant/commands/device.py
-@@ -24,11 +24,17 @@ def status(ctx):
+@@ -24,11 +24,26 @@ def status(ctx):
          click.echo(f"\n  Battery: {battery}%")
  
      click.echo("\nGetting device status...")
@@ -1349,10 +1349,12 @@ index e05b050..3e02c5a 100644
 -    GLib.timeout_add_seconds(3, lambda: client.stop() or False)
 -    client.run_with_timeout(5)
 -    client.disconnect()
++    client._status_printed = True   # print once, after all the pieces have arrived
 +    try:
 +        client.send_command("get_device_status")
-+        GLib.timeout_add_seconds(3, lambda: client.stop() or False)
-+        client.run_with_timeout(5)
++        GLib.timeout_add_seconds(2, lambda: client.send_command("get_device_status") or False)
++        GLib.timeout_add_seconds(4, lambda: client.stop() or False)
++        client.run_with_timeout(6)
 +    except Exception as e:
 +        # Usually a sync has the pendant busy (or it just erased pages and dropped the link).
 +        raise click.ClickException(
@@ -1360,10 +1362,17 @@ index e05b050..3e02c5a 100644
 +            "A sync may be using it; try again in a minute.")
 +    finally:
 +        client.disconnect()
++    if client.last_status:
++        from pendant.core.protocol import format_status_lines
++        click.echo()
++        for line in format_status_lines(client.last_status):
++            click.echo(line)
++    else:
++        click.echo("  The pendant didn't send its status; try again in a minute.")
  
  
  @click.command()
-@@ -46,10 +52,27 @@ def info(ctx):
+@@ -46,10 +61,27 @@ def info(ctx):
      click.echo("\nGetting device info...")
      client.send_command("get_device_info")
  
@@ -1393,7 +1402,7 @@ index e05b050..3e02c5a 100644
  
  @click.command()
  @click.option('--timeout', '-t', default=60, help='Timeout in seconds (0 = indefinite)')
-@@ -76,18 +99,24 @@ def listen(ctx, timeout):
+@@ -76,18 +108,24 @@ def listen(ctx, timeout):
          timestamp = datetime.now().strftime("%H:%M:%S")
          
          if rtype == "button_status":
@@ -1424,7 +1433,7 @@ index e05b050..3e02c5a 100644
          elif rtype and rtype != "parse_error":
              click.echo(f"[{timestamp}] Event: {rtype}")
  
-@@ -101,3 +130,52 @@ def listen(ctx, timeout):
+@@ -101,3 +139,52 @@ def listen(ctx, timeout):
          click.echo("\nStopped listening.")
      finally:
          client.disconnect()
@@ -1808,7 +1817,7 @@ index 5278f23..ca072c2 100644
          elif rtype == "battery_status":
              print(f"\n  Battery: {response.get('level', 0)}%")
 diff --git a/src/pendant/core/dbus_client.py b/src/pendant/core/dbus_client.py
-index a5867ef..c803d7d 100644
+index a5867ef..f05d548 100644
 --- a/src/pendant/core/dbus_client.py
 +++ b/src/pendant/core/dbus_client.py
 @@ -1,10 +1,11 @@
@@ -1846,7 +1855,7 @@ index a5867ef..c803d7d 100644
  
      def _init_dbus(self):
          """Initialize D-Bus connection."""
-@@ -74,22 +85,25 @@ class DBusClient:
+@@ -74,22 +85,26 @@ class DBusClient:
          self.responses.append(rtype)
  
          if rtype == "device_info":
@@ -1862,9 +1871,10 @@ index a5867ef..c803d7d 100644
                  self._info_printed = True
  
          elif rtype == "device_status":
-+            self.last_status = response
-+            if self.first_status is None:
-+                self.first_status = response  # storage as it was before the download
++            from .protocol import merge_status
++            self.last_status = merge_status(self.last_status, response)
++            if self.first_status is None or self.page_count == 0:
++                self.first_status = self.last_status  # as it was before the download
              if not self._status_printed:
 -                is_recording = response.get('is_recording', False)
 -                print(f"\n  Recording: {is_recording}")
@@ -1880,7 +1890,7 @@ index a5867ef..c803d7d 100644
              print(f"\n  Battery: {response.get('level', 0)}%")
              if response.get('charging'):
                  print(f"  Charging: yes")
-@@ -99,11 +113,26 @@ class DBusClient:
+@@ -99,11 +114,26 @@ class DBusClient:
  
          elif rtype == "storage_buffer":
              self.page_count += 1
@@ -1907,7 +1917,7 @@ index a5867ef..c803d7d 100644
                  # Track audio offset for this page
                  page_info["audio_offset_bytes"] = len(self.opus_data)
                  self.page_timestamps.append(page_info)
-@@ -114,12 +143,26 @@ class DBusClient:
+@@ -114,12 +144,26 @@ class DBusClient:
                  enc_str = f" enc={len(self.encrypted_data)}B" if self.encrypted_data else ""
                  print(f"\r  Page {self.page_count}: opus={len(self.opus_data)}B pcm={len(self.pcm_data)}B{enc_str}", end="", flush=True)
  
@@ -1935,7 +1945,7 @@ index a5867ef..c803d7d 100644
      def check_connection(self) -> bool:
          """Check if device is connected."""
          try:
-@@ -158,13 +201,15 @@ class DBusClient:
+@@ -158,13 +202,15 @@ class DBusClient:
              'org.bluez.GattCharacteristic1'
          )
  
@@ -1958,7 +1968,7 @@ index a5867ef..c803d7d 100644
  
          # Enable notifications
          try:
-@@ -211,13 +256,41 @@ class DBusClient:
+@@ -211,13 +257,41 @@ class DBusClient:
          if self.loop:
              self.loop.quit()
  
@@ -2041,10 +2051,10 @@ index 0a797ea..16d9f6b 100644
              offset += frame_size
              frame_count += 1
 diff --git a/src/pendant/core/protocol.py b/src/pendant/core/protocol.py
-index c342f7e..2ed2620 100644
+index c342f7e..f2cd3d1 100644
 --- a/src/pendant/core/protocol.py
 +++ b/src/pendant/core/protocol.py
-@@ -10,12 +10,63 @@ from .config import KEYS_DIR
+@@ -10,12 +10,101 @@ from .config import KEYS_DIR
  DEBUG_MODE = False
  
  
@@ -2059,6 +2069,40 @@ index c342f7e..2ed2620 100644
 +SYNC_MODE_LABELS = {0: "off", 1: "sending recordings (batch)", 2: "real-time", 3: "Wi-Fi"}  # app: PendantSyncMode
 +
 +
++# Keys that come from each part of a DeviceStatus, for merging pieces.
++_STATUS_PARTS = {
++    "recording_status": ("is_recording", "recording_state", "recording_label", "vad_level"),
++    "storage_state": ("storage_used_percent", "storage_used_pages", "storage_total_pages"),
++    "battery_status": ("battery_level", "battery_charging", "battery_current", "battery_voltage"),
++    "vad_threshold": ("vad_threshold_ms",),
++    "sync_mode": ("sync_mode", "sync_mode_label"),
++    "led_brightness": ("led_brightness",),
++}
++
++
++def merge_status(old, new):
++    """Combine status pieces: take from `new` only the parts it actually carries."""
++    parts = set(new.get("_parts") or [])
++    # Plain numbers (sync mode, light) aren't listed when zero, so "off" looks the same as
++    # "not sent". Trust them only from a message that carries the main parts.
++    if new.get("has_all_fields") or parts & {"recording_status", "storage_state"}:
++        parts |= {"sync_mode", "led_brightness"}
++    if not old:
++        out = dict(new)
++        out["_parts"] = sorted(parts)
++        return out
++    out = dict(old)
++    owned = {k for keys in _STATUS_PARTS.values() for k in keys}
++    for part, keys in _STATUS_PARTS.items():
++        if part in parts:
++            out.update({k: new[k] for k in keys if k in new})
++    for k, v in new.items():   # anything not tied to a part (wifi, flags)
++        if k not in owned and k != "_parts":
++            out[k] = v
++    out["_parts"] = sorted(set(old.get("_parts") or []) | parts)
++    return out
++
++
 +def _status_dict(status) -> dict:
 +    """Flatten a DeviceStatus message (field layout from the Limitless Android app)."""
 +    out = {"is_recording": False, "recording_state": None, "recording_label": "unknown",
@@ -2067,7 +2111,11 @@ index c342f7e..2ed2620 100644
 +           "led_brightness": status.led_brightness,
 +           "sync_mode": status.sync_mode,
 +           "vad_threshold_ms": status.vad_threshold.vad_threshold_ms if status.HasField("vad_threshold") else None,
-+           "sync_mode_label": SYNC_MODE_LABELS.get(status.sync_mode, f"mode {status.sync_mode}")}
++           "sync_mode_label": SYNC_MODE_LABELS.get(status.sync_mode, f"mode {status.sync_mode}"),
++           "has_all_fields": status.has_all_fields,
++           # Which parts this message actually carries: the pendant sometimes sends a status
++           # in pieces, and a missing part reads as zero/"off" rather than as absent.
++           "_parts": [f.name for f, _ in status.ListFields()]}
 +    if status.HasField("battery_status"):
 +        bat = status.battery_status
 +        out["battery_level"] = bat.soc
@@ -2108,7 +2156,7 @@ index c342f7e..2ed2620 100644
  
      def create_ble_message(self, payload: bytes) -> bytes:
          """Wrap a payload in BLE message envelope."""
-@@ -82,6 +133,11 @@ class PendantProtocol:
+@@ -82,6 +171,11 @@ class PendantProtocol:
              dl.real_time_mode_enabled = kwargs.get("realtime", False)
              cmd.download_flash_pages.CopyFrom(dl)
  
@@ -2120,7 +2168,7 @@ index c342f7e..2ed2620 100644
          elif cmd_type == "set_current_time":
              sct = pb.SetCurrentTime()
              sct.timestamp_ms = kwargs.get("timestamp_ms", int(datetime.now().timestamp() * 1000))
-@@ -111,17 +167,19 @@ class PendantProtocol:
+@@ -111,17 +205,19 @@ class PendantProtocol:
  
          elif cmd_type == "set_led":
              led_msg = pb.SetLed()
@@ -2143,7 +2191,7 @@ index c342f7e..2ed2620 100644
              cmd.set_vad_threshold.CopyFrom(vad_msg)
  
          elif cmd_type == "set_device_name":
-@@ -166,39 +224,22 @@ class PendantProtocol:
+@@ -166,39 +262,22 @@ class PendantProtocol:
              if content_type == "device_info":
                  info = msg.device_info
                  result.update({
@@ -2195,7 +2243,7 @@ index c342f7e..2ed2620 100644
  
              elif content_type == "storage_buffer":
                  buf = msg.storage_buffer
-@@ -232,14 +273,23 @@ class PendantProtocol:
+@@ -232,14 +311,23 @@ class PendantProtocol:
                  })
  
              elif content_type == "button_status":
@@ -2221,7 +2269,7 @@ index c342f7e..2ed2620 100644
  
              return result
  
-@@ -279,6 +329,17 @@ class PendantProtocol:
+@@ -279,6 +367,17 @@ class PendantProtocol:
                  print(f"\n    FlashPage: ts={page.absolute_timestamp_ms}, uptime={page.boot_uptime_ms}, chunks={len(page.chunks)}")
  
              for i, chunk in enumerate(page.chunks):
@@ -2239,7 +2287,7 @@ index c342f7e..2ed2620 100644
                  # Chunk is not a oneof - check if audio_data field is populated
                  has_audio = chunk.HasField('audio_data') if hasattr(chunk, 'HasField') else bool(chunk.audio_data.ByteSize())
  
-@@ -339,82 +400,143 @@ class PendantProtocol:
+@@ -339,82 +438,143 @@ class PendantProtocol:
                          if DEBUG_MODE:
                              print(f"        encrypted: ciphertext={len(enc.ciphertext)}B, nonce={len(enc.nonce)}B, tag={len(enc.tag)}B")
  
@@ -3036,6 +3084,38 @@ index ad39d00..488ea96 100644
 +    from pendant.core.protocol import pb
 +    raw = pb.SetLed(red_enabled=True, blue_enabled=True).SerializeToString()
 +    assert raw == b"\x08\x01\x18\x01"  # red=1, blue=3
+diff --git a/tests/test_status_pieces.py b/tests/test_status_pieces.py
+new file mode 100644
+index 0000000..166f2de
+--- /dev/null
++++ b/tests/test_status_pieces.py
+@@ -0,0 +1,26 @@
++"""The pendant can send its status in pieces; combine them (Oct 14)."""
++from pendant.core.protocol import merge_status
++
++
++def test_pieces_combine_and_missing_parts_dont_read_as_zero():
++    full = {"_parts": ["recording_status", "storage_state", "sync_mode", "vad_threshold"],
++            "recording_label": "listening", "is_recording": False, "recording_state": 2, "vad_level": 3,
++            "storage_used_pages": 849, "storage_used_percent": 0.9, "storage_total_pages": 95232,
++            "sync_mode": 1, "sync_mode_label": "sending recordings (batch)", "vad_threshold_ms": 5000}
++    battery_only = {"_parts": ["battery_status"], "battery_level": 100, "battery_charging": False,
++                    "battery_current": -12, "battery_voltage": 4100,
++                    "recording_label": "unknown", "storage_used_pages": None, "storage_used_percent": 0.0,
++                    "sync_mode": 0, "sync_mode_label": "off", "vad_threshold_ms": None}
++    m = merge_status(full, battery_only)
++    assert m["recording_label"] == "listening" and m["storage_used_pages"] == 849
++    assert m["sync_mode_label"] == "sending recordings (batch)"     # not overwritten by a missing part
++    assert m["vad_threshold_ms"] == 5000 and m["battery_current"] == -12
++    m2 = merge_status(battery_only, full)
++    assert m2["battery_level"] == 100 and m2["recording_label"] == "listening"
++
++
++def test_sync_mode_off_is_taken_from_a_full_message():
++    batch = {"_parts": ["recording_status", "sync_mode"], "sync_mode": 1, "sync_mode_label": "sending recordings (batch)"}
++    off = {"_parts": ["recording_status", "storage_state"], "sync_mode": 0, "sync_mode_label": "off"}
++    assert merge_status(batch, off)["sync_mode_label"] == "off"
++    assert merge_status(None, {"_parts": ["battery_status"], "sync_mode": 0})["_parts"] == ["battery_status"]
 diff --git a/tests/test_sync_command.py b/tests/test_sync_command.py
 new file mode 100644
 index 0000000..aeea62b
