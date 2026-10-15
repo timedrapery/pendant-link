@@ -307,7 +307,7 @@ index fb98890..4c861ff 100644
  # Register command groups
  cli.add_command(bluetooth.bt)
 diff --git a/src/pendant/commands/audio.py b/src/pendant/commands/audio.py
-index cf0b2e6..a884db3 100644
+index cf0b2e6..017a031 100644
 --- a/src/pendant/commands/audio.py
 +++ b/src/pendant/commands/audio.py
 @@ -1,6 +1,8 @@
@@ -770,7 +770,7 @@ index cf0b2e6..a884db3 100644
          # Check if timestamps are real (synced) or just device uptime
          first_ts = client.page_timestamps[0].get("absolute_timestamp_ms", 0) if client.page_timestamps else 0
          timestamps_synced = first_ts > MIN_VALID_TIMESTAMP_MS
-@@ -102,25 +476,214 @@ def download(ctx, decode, output):
+@@ -102,25 +476,220 @@ def download(ctx, decode, output):
              "download_time_iso": datetime.now().isoformat(),
              "timestamps_synced": timestamps_synced,
              "total_pages": client.page_count,
@@ -944,7 +944,10 @@ index cf0b2e6..a884db3 100644
 +        previous = json.loads(path.read_text())
 +    except (OSError, ValueError):
 +        previous = {}
++    st = client.last_status or {}
 +    battery = (client.last_battery or {}).get("level")
++    if battery is None:
++        battery = st.get("battery_level")
 +    if battery is None and address:
 +        from pendant.core.dbus_client import get_battery_from_dbus
 +        battery = get_battery_from_dbus(address)  # the standard Bluetooth battery service
@@ -952,7 +955,8 @@ index cf0b2e6..a884db3 100644
 +        "last_sync": datetime.now().isoformat(timespec="seconds"),
 +        "pages_pulled": client.page_count,
 +        "battery_percent": battery,
-+        "charging": bool((client.last_battery or {}).get("charging")),
++        "charging": bool((client.last_battery or {}).get("charging") or st.get("battery_charging")),
++        "battery_current_ma": st.get("battery_current"),
 +        "storage_used_percent": (client.last_status or {}).get("storage_used_percent"),
 +        "recording": (client.last_status or {}).get("recording_label"),
 +        "sync_mode": (client.last_status or {}).get("sync_mode_label"),
@@ -962,8 +966,10 @@ index cf0b2e6..a884db3 100644
 +    #   grep -a "Battery at" ~/recordings/sync.log
 +    if battery is not None:
 +        click.echo(f"Battery at {health['last_sync'][:16].replace('T', ' ')}: {battery}%"
-+                   + (" (charging)" if health["charging"] else "")
-+                   + f", {client.page_count} pages this sync")
++                   + (" (plugged in)" if health["charging"] else "")
++                   + f", {client.page_count} pages this sync"
++                   + (f", drawing {st['battery_current']} mA" if st.get("battery_current") is not None else "")
++                   + (f", speech level {st['vad_level']}" if st.get("vad_level") is not None else ""))
 +    if freeing is not None and client.page_count:
 +        if freeing.get("freed"):
 +            health["last_freed"] = health["last_sync"]
@@ -2035,10 +2041,10 @@ index 0a797ea..16d9f6b 100644
              offset += frame_size
              frame_count += 1
 diff --git a/src/pendant/core/protocol.py b/src/pendant/core/protocol.py
-index c342f7e..e619619 100644
+index c342f7e..2ed2620 100644
 --- a/src/pendant/core/protocol.py
 +++ b/src/pendant/core/protocol.py
-@@ -10,12 +10,55 @@ from .config import KEYS_DIR
+@@ -10,12 +10,63 @@ from .config import KEYS_DIR
  DEBUG_MODE = False
  
  
@@ -2062,11 +2068,19 @@ index c342f7e..e619619 100644
 +           "sync_mode": status.sync_mode,
 +           "vad_threshold_ms": status.vad_threshold.vad_threshold_ms if status.HasField("vad_threshold") else None,
 +           "sync_mode_label": SYNC_MODE_LABELS.get(status.sync_mode, f"mode {status.sync_mode}")}
++    if status.HasField("battery_status"):
++        bat = status.battery_status
++        out["battery_level"] = bat.soc
++        # Plugged in: charging, full, or USB connected (state 1/4, usb_state 2).
++        out["battery_charging"] = bat.state in (1, 4) or bat.usb_state == 2
++        out["battery_current"] = bat.current   # as the pendant reports it (mA)
++        out["battery_voltage"] = bat.voltage
 +    if status.HasField("recording_status"):
 +        state = status.recording_status.recording_state
 +        out["recording_state"] = state
 +        out["recording_label"] = RECORDING_STATE_LABELS.get(state, f"state {state}")
 +        out["is_recording"] = state == 1
++        out["vad_level"] = status.recording_status.vad_level  # how much speech it thinks it hears now
 +    if status.HasField("storage_state"):
 +        total = status.storage_state.total_capture_pages
 +        free = status.storage_state.free_capture_pages
@@ -2094,7 +2108,7 @@ index c342f7e..e619619 100644
  
      def create_ble_message(self, payload: bytes) -> bytes:
          """Wrap a payload in BLE message envelope."""
-@@ -82,6 +125,11 @@ class PendantProtocol:
+@@ -82,6 +133,11 @@ class PendantProtocol:
              dl.real_time_mode_enabled = kwargs.get("realtime", False)
              cmd.download_flash_pages.CopyFrom(dl)
  
@@ -2106,7 +2120,7 @@ index c342f7e..e619619 100644
          elif cmd_type == "set_current_time":
              sct = pb.SetCurrentTime()
              sct.timestamp_ms = kwargs.get("timestamp_ms", int(datetime.now().timestamp() * 1000))
-@@ -111,17 +159,19 @@ class PendantProtocol:
+@@ -111,17 +167,19 @@ class PendantProtocol:
  
          elif cmd_type == "set_led":
              led_msg = pb.SetLed()
@@ -2129,7 +2143,7 @@ index c342f7e..e619619 100644
              cmd.set_vad_threshold.CopyFrom(vad_msg)
  
          elif cmd_type == "set_device_name":
-@@ -166,39 +216,22 @@ class PendantProtocol:
+@@ -166,39 +224,22 @@ class PendantProtocol:
              if content_type == "device_info":
                  info = msg.device_info
                  result.update({
@@ -2181,7 +2195,7 @@ index c342f7e..e619619 100644
  
              elif content_type == "storage_buffer":
                  buf = msg.storage_buffer
-@@ -232,14 +265,23 @@ class PendantProtocol:
+@@ -232,14 +273,23 @@ class PendantProtocol:
                  })
  
              elif content_type == "button_status":
@@ -2207,7 +2221,7 @@ index c342f7e..e619619 100644
  
              return result
  
-@@ -279,6 +321,17 @@ class PendantProtocol:
+@@ -279,6 +329,17 @@ class PendantProtocol:
                  print(f"\n    FlashPage: ts={page.absolute_timestamp_ms}, uptime={page.boot_uptime_ms}, chunks={len(page.chunks)}")
  
              for i, chunk in enumerate(page.chunks):
@@ -2225,7 +2239,7 @@ index c342f7e..e619619 100644
                  # Chunk is not a oneof - check if audio_data field is populated
                  has_audio = chunk.HasField('audio_data') if hasattr(chunk, 'HasField') else bool(chunk.audio_data.ByteSize())
  
-@@ -339,82 +392,137 @@ class PendantProtocol:
+@@ -339,82 +400,143 @@ class PendantProtocol:
                          if DEBUG_MODE:
                              print(f"        encrypted: ciphertext={len(enc.ciphertext)}B, nonce={len(enc.nonce)}B, tag={len(enc.tag)}B")
  
@@ -2329,6 +2343,12 @@ index c342f7e..e619619 100644
 +        lines.append(f"  Sync mode: {st['sync_mode_label']}")
 +    if st.get("vad_threshold_ms") is not None:
 +        lines.append(f"  Speech detection setting: {st['vad_threshold_ms']} ms")
++    if st.get("battery_current") is not None:
++        lines.append(f"  Battery: {st.get('battery_level')}%"
++                     + (" (plugged in)" if st.get("battery_charging") else "")
++                     + f", current {st['battery_current']} mA, {st.get('battery_voltage')} mV")
++    if st.get("vad_level") is not None:
++        lines.append(f"  Speech level it hears right now: {st['vad_level']}")
 +    return lines
 +
 +
